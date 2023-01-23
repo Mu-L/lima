@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.6
-	github.com/Code-Hex/vz/v3 v3.0.3
+	github.com/Code-Hex/vz/v3 v3.0.4
 	github.com/alessio/shellescape v1.4.1
 	github.com/cheggaaa/pb/v3 v3.1.0
 	github.com/containerd/containerd v1.6.15
@@ -36,6 +36,7 @@ require (
 	golang.org/x/sync v0.1.0
 	golang.org/x/sys v0.4.0
 	gotest.tools/v3 v3.4.0
+	inet.af/tcpproxy v0.0.0-20220326234310-be3ee21c9fa0
 )
 
 require (
@@ -77,5 +78,4 @@ require (
 	gopkg.in/djherbis/times.v1 v1.2.0 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 	gvisor.dev/gvisor v0.0.0-20220908032458-edc830a43ba6 // indirect
-	inet.af/tcpproxy v0.0.0-20220326234310-be3ee21c9fa0 // indirect
 )
