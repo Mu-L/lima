@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coreos/go-semver/semver"
 	"github.com/lima-vm/lima/pkg/ioutilx"
@@ -21,9 +22,39 @@ import (
 	"github.com/lima-vm/lima/pkg/osutil"
 	"github.com/lima-vm/lima/pkg/store/dirnames"
 	"github.com/lima-vm/lima/pkg/store/filenames"
+	"github.com/mattn/go-shellwords"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/cpu"
 )
+
+// Environment variable that allows configuring the command (alias) to execute
+// in place of the 'ssh' executable.
+const EnvShellSSH = "SSH"
+
+func SSHArguments() (arg0 string, arg0Args []string, err error) {
+	if sshShell := os.Getenv(EnvShellSSH); sshShell != "" {
+		sshShellFields, err := shellwords.Parse(sshShell)
+		switch {
+		case err != nil:
+			logrus.WithError(err).Warnf("Failed to split %s variable into shell tokens. "+
+				"Falling back to 'ssh' command", EnvShellSSH)
+		case len(sshShellFields) > 0:
+			arg0 = sshShellFields[0]
+			if len(sshShellFields) > 1 {
+				arg0Args = sshShellFields[1:]
+			}
+		}
+	}
+
+	if arg0 == "" {
+		arg0, err = exec.LookPath("ssh")
+		if err != nil {
+			return "", []string{""}, err
+		}
+	}
+
+	return arg0, arg0Args, nil
+}
 
 type PubKey struct {
 	Filename string
@@ -63,8 +94,9 @@ func DefaultPubKeys(loadDotSSH bool) ([]PubKey, error) {
 			return nil, fmt.Errorf("could not create %q directory: %w", configDir, err)
 		}
 		if err := lockutil.WithDirLock(configDir, func() error {
-			keygenCmd := exec.Command("ssh-keygen", "-t", "ed25519", "-q", "-N", "", "-f",
-				filepath.Join(configDir, filenames.UserPrivateKey))
+			// no passphrase, no user@host comment
+			keygenCmd := exec.Command("ssh-keygen", "-t", "ed25519", "-q", "-N", "",
+				"-C", "lima", "-f", filepath.Join(configDir, filenames.UserPrivateKey))
 			logrus.Debugf("executing %v", keygenCmd.Args)
 			if out, err := keygenCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("failed to run %v: %q: %w", keygenCmd.Args, string(out), err)
@@ -125,7 +157,7 @@ var sshInfo struct {
 //
 // The result always contains the IdentityFile option.
 // The result never contains the Port option.
-func CommonOpts(useDotSSH bool) ([]string, error) {
+func CommonOpts(sshPath string, useDotSSH bool) ([]string, error) {
 	configDir, err := dirnames.LimaConfigDir()
 	if err != nil {
 		return nil, err
@@ -193,7 +225,7 @@ func CommonOpts(useDotSSH bool) ([]string, error) {
 
 	sshInfo.Do(func() {
 		sshInfo.aesAccelerated = detectAESAcceleration()
-		sshInfo.openSSHVersion = DetectOpenSSHVersion()
+		sshInfo.openSSHVersion = DetectOpenSSHVersion(sshPath)
 	})
 
 	// Only OpenSSH version 8.1 and later support adding ciphers to the front of the default set
@@ -221,17 +253,13 @@ func CommonOpts(useDotSSH bool) ([]string, error) {
 	return opts, nil
 }
 
-// SSHOpts adds the following options to CommonOptions: User, ControlMaster, ControlPath, ControlPersist
-func SSHOpts(instDir string, useDotSSH, forwardAgent bool, forwardX11 bool, forwardX11Trusted bool) ([]string, error) {
+// SSHOpts adds the following options to CommonOptions: User, ControlMaster, ControlPath, ControlPersist.
+func SSHOpts(sshPath, instDir, username string, useDotSSH, forwardAgent, forwardX11, forwardX11Trusted bool) ([]string, error) {
 	controlSock := filepath.Join(instDir, filenames.SSHSock)
 	if len(controlSock) >= osutil.UnixPathMax {
 		return nil, fmt.Errorf("socket path %q is too long: >= UNIX_PATH_MAX=%d", controlSock, osutil.UnixPathMax)
 	}
-	u, err := osutil.LimaUser(false)
-	if err != nil {
-		return nil, err
-	}
-	opts, err := CommonOpts(useDotSSH)
+	opts, err := CommonOpts(sshPath, useDotSSH)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +269,7 @@ func SSHOpts(instDir string, useDotSSH, forwardAgent bool, forwardX11 bool, forw
 		controlPath = fmt.Sprintf(`ControlPath='%s'`, controlSock)
 	}
 	opts = append(opts,
-		fmt.Sprintf("User=%s", u.Username), // guest and host have the same username, but we should specify the username explicitly (#85)
+		fmt.Sprintf("User=%s", username), // guest and host have the same username, but we should specify the username explicitly (#85)
 		"ControlMaster=auto",
 		controlPath,
 		"ControlPersist=yes",
@@ -280,18 +308,48 @@ func ParseOpenSSHVersion(version []byte) *semver.Version {
 	return &semver.Version{}
 }
 
-func DetectOpenSSHVersion() semver.Version {
+// sshExecutable beyond path also records size and mtime, in the case of ssh upgrades.
+type sshExecutable struct {
+	Path    string
+	Size    int64
+	ModTime time.Time
+}
+
+var (
+	// sshVersions caches the parsed version of each ssh executable, if it is needed again.
+	sshVersions   = map[sshExecutable]*semver.Version{}
+	sshVersionsRW sync.RWMutex
+)
+
+func DetectOpenSSHVersion(ssh string) semver.Version {
 	var (
 		v      semver.Version
+		exe    sshExecutable
 		stderr bytes.Buffer
 	)
-	cmd := exec.Command("ssh", "-V")
+	path, err := exec.LookPath(ssh)
+	if err != nil {
+		logrus.Warnf("failed to find ssh executable: %v", err)
+	} else {
+		st, _ := os.Stat(path)
+		exe = sshExecutable{Path: path, Size: st.Size(), ModTime: st.ModTime()}
+		sshVersionsRW.RLock()
+		ver := sshVersions[exe]
+		sshVersionsRW.RUnlock()
+		if ver != nil {
+			return *ver
+		}
+	}
+	cmd := exec.Command(path, "-V")
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		logrus.Warnf("failed to run %v: stderr=%q", cmd.Args, stderr.String())
 	} else {
 		v = *ParseOpenSSHVersion(stderr.Bytes())
 		logrus.Debugf("OpenSSH version %s detected", v)
+		sshVersionsRW.Lock()
+		sshVersions[exe] = &v
+		sshVersionsRW.Unlock()
 	}
 	return v
 }
@@ -323,6 +381,11 @@ func detectValidPublicKey(content string) bool {
 
 func detectAESAcceleration() bool {
 	if !cpu.Initialized {
+		if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
+			// cpu.Initialized seems to always be false, even when the cpu.ARM64 struct is filled out
+			// it is only being set by readARM64Registers, but not by readHWCAP or readLinuxProcCPUInfo
+			return cpu.ARM64.HasAES
+		}
 		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 			// golang.org/x/sys/cpu supports darwin/amd64, linux/amd64, and linux/arm64,
 			// but apparently lacks support for darwin/arm64: https://github.com/golang/sys/blob/v0.5.0/cpu/cpu_arm64.go#L43-L60

@@ -2,22 +2,22 @@ package windows
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
-	"golang.org/x/exp/slices"
 	"golang.org/x/sys/windows/registry"
 )
 
 const (
 	guestCommunicationsPrefix = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices`
-	MagicVSOCKSuffix          = "-facb-11e6-bd58-64006a7986d3"
+	magicVSOCKSuffix          = "-facb-11e6-bd58-64006a7986d3"
 	wslDistroInfoPrefix       = `SOFTWARE\Microsoft\Windows\CurrentVersion\Lxss`
 )
 
-// AddVSockRegistryKey makes a vsock server running on the host acceessible in guests.
+// AddVSockRegistryKey makes a vsock server running on the host accessible in guests.
 func AddVSockRegistryKey(port int) error {
 	rootKey, err := getGuestCommunicationServicesKey(true)
 	if err != nil {
@@ -34,7 +34,7 @@ func AddVSockRegistryKey(port int) error {
 		return fmt.Errorf("port %q in use", port)
 	}
 
-	vsockKeyPath := fmt.Sprintf(`%x%s`, port, MagicVSOCKSuffix)
+	vsockKeyPath := fmt.Sprintf(`%x%s`, port, magicVSOCKSuffix)
 	vSockKey, _, err := registry.CreateKey(
 		rootKey,
 		vsockKeyPath,
@@ -61,7 +61,7 @@ func RemoveVSockRegistryKey(port int) error {
 	}
 	defer rootKey.Close()
 
-	vsockKeyPath := fmt.Sprintf(`%x%s`, port, MagicVSOCKSuffix)
+	vsockKeyPath := fmt.Sprintf(`%x%s`, port, magicVSOCKSuffix)
 	if err := registry.DeleteKey(rootKey, vsockKeyPath); err != nil {
 		return fmt.Errorf(
 			"failed to create new key (%s%s): %w",
@@ -74,7 +74,7 @@ func RemoveVSockRegistryKey(port int) error {
 	return nil
 }
 
-// IsVSockPortFree determines if a VSock port has been registiered already.
+// IsVSockPortFree determines if a VSock port has been registered already.
 func IsVSockPortFree(port int) (bool, error) {
 	rootKey, err := getGuestCommunicationServicesKey(false)
 	if err != nil {
@@ -168,7 +168,7 @@ func GetRandomFreeVSockPort(min, max int) (int, error) {
 		}
 	}
 
-	v := rand.Intn(max - min + 1 - len(used))
+	v := rand.IntN(max - min + 1 - len(used))
 
 	for len(tree) > 1 {
 		m := len(tree) / 2
@@ -215,7 +215,7 @@ func getUsedPorts(key registry.Key) ([]int, error) {
 
 	out := []int{}
 	for _, k := range keys {
-		split := strings.Split(k, MagicVSOCKSuffix)
+		split := strings.Split(k, magicVSOCKSuffix)
 		if len(split) == 2 {
 			i, err := strconv.Atoi(split[0])
 			if err != nil {

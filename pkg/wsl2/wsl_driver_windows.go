@@ -6,11 +6,13 @@ import (
 	"net"
 	"regexp"
 
+	"github.com/Microsoft/go-winio"
+	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/lima-vm/lima/pkg/driver"
 	"github.com/lima-vm/lima/pkg/limayaml"
 	"github.com/lima-vm/lima/pkg/reflectutil"
 	"github.com/lima-vm/lima/pkg/store"
-	"github.com/mdlayher/vsock"
+	"github.com/lima-vm/lima/pkg/windows"
 	"github.com/sirupsen/logrus"
 )
 
@@ -27,6 +29,7 @@ var knownYamlProperties = []string{
 	"Message",
 	"Mounts",
 	"MountType",
+	"Param",
 	"Plain",
 	"PortForwards",
 	"Probes",
@@ -49,54 +52,51 @@ func New(driver *driver.BaseDriver) *LimaWslDriver {
 }
 
 func (l *LimaWslDriver) Validate() error {
-	if *l.Yaml.MountType != limayaml.WSLMount {
-		return fmt.Errorf("field `mountType` must be %q for WSL2 driver, got %q", limayaml.WSLMount, *l.Yaml.MountType)
+	if *l.Instance.Config.MountType != limayaml.WSLMount {
+		return fmt.Errorf("field `mountType` must be %q for WSL2 driver, got %q", limayaml.WSLMount, *l.Instance.Config.MountType)
 	}
 	// TODO: revise this list for WSL2
-	if unknown := reflectutil.UnknownNonEmptyFields(l.Yaml, knownYamlProperties...); len(unknown) > 0 {
-		logrus.Warnf("Ignoring: vmType %s: %+v", *l.Yaml.VMType, unknown)
+	if unknown := reflectutil.UnknownNonEmptyFields(l.Instance.Config, knownYamlProperties...); len(unknown) > 0 {
+		logrus.Warnf("Ignoring: vmType %s: %+v", *l.Instance.Config.VMType, unknown)
 	}
 
-	if !limayaml.IsNativeArch(*l.Yaml.Arch) {
-		return fmt.Errorf("unsupported arch: %q", *l.Yaml.Arch)
+	if !limayaml.IsNativeArch(*l.Instance.Config.Arch) {
+		return fmt.Errorf("unsupported arch: %q", *l.Instance.Config.Arch)
 	}
 
-	for k, v := range l.Yaml.CPUType {
+	for k, v := range l.Instance.Config.CPUType {
 		if v != "" {
-			logrus.Warnf("Ignoring: vmType %s: cpuType[%q]: %q", *l.Yaml.VMType, k, v)
+			logrus.Warnf("Ignoring: vmType %s: cpuType[%q]: %q", *l.Instance.Config.VMType, k, v)
 		}
 	}
 
-	re, err := regexp.Compile(`.*tar\.*`)
-	if err != nil {
-		return fmt.Errorf("failed to compile file check regex: %w", err)
-	}
-	for i, image := range l.Yaml.Images {
+	// TODO: real filetype checks
+	tarFileRegex := regexp.MustCompile(`.*tar\.*`)
+	for i, image := range l.Instance.Config.Images {
 		if unknown := reflectutil.UnknownNonEmptyFields(image, "File"); len(unknown) > 0 {
-			logrus.Warnf("Ignoring: vmType %s: images[%d]: %+v", *l.Yaml.VMType, i, unknown)
+			logrus.Warnf("Ignoring: vmType %s: images[%d]: %+v", *l.Instance.Config.VMType, i, unknown)
 		}
-		// TODO: real filetype checks
-		match := re.MatchString(image.Location)
-		if image.Arch == *l.Yaml.Arch && !match {
-			return fmt.Errorf("unsupported image type for vmType: %s, tarball root file system required: %q", *l.Yaml.VMType, image.Location)
+		match := tarFileRegex.MatchString(image.Location)
+		if image.Arch == *l.Instance.Config.Arch && !match {
+			return fmt.Errorf("unsupported image type for vmType: %s, tarball root file system required: %q", *l.Instance.Config.VMType, image.Location)
 		}
 	}
 
-	for i, mount := range l.Yaml.Mounts {
+	for i, mount := range l.Instance.Config.Mounts {
 		if unknown := reflectutil.UnknownNonEmptyFields(mount); len(unknown) > 0 {
-			logrus.Warnf("Ignoring: vmType %s: mounts[%d]: %+v", *l.Yaml.VMType, i, unknown)
+			logrus.Warnf("Ignoring: vmType %s: mounts[%d]: %+v", *l.Instance.Config.VMType, i, unknown)
 		}
 	}
 
-	for i, network := range l.Yaml.Networks {
+	for i, network := range l.Instance.Config.Networks {
 		if unknown := reflectutil.UnknownNonEmptyFields(network); len(unknown) > 0 {
-			logrus.Warnf("Ignoring: vmType %s: networks[%d]: %+v", *l.Yaml.VMType, i, unknown)
+			logrus.Warnf("Ignoring: vmType %s: networks[%d]: %+v", *l.Instance.Config.VMType, i, unknown)
 		}
 	}
 
-	audioDevice := *l.Yaml.Audio.Device
+	audioDevice := *l.Instance.Config.Audio.Device
 	if audioDevice != "" {
-		logrus.Warnf("Ignoring: vmType %s: `audio.device`: %+v", *l.Yaml.VMType, audioDevice)
+		logrus.Warnf("Ignoring: vmType %s: `audio.device`: %+v", *l.Instance.Config.VMType, audioDevice)
 	}
 
 	return nil
@@ -112,7 +112,7 @@ func (l *LimaWslDriver) Start(ctx context.Context) (chan error, error) {
 	distroName := "lima-" + l.Instance.Name
 
 	if status == store.StatusUninitialized {
-		if err := EnsureFs(l.BaseDriver); err != nil {
+		if err := EnsureFs(ctx, l.BaseDriver); err != nil {
 			return nil, err
 		}
 		if err := initVM(ctx, l.BaseDriver.Instance.Dir, distroName); err != nil {
@@ -131,12 +131,12 @@ func (l *LimaWslDriver) Start(ctx context.Context) (chan error, error) {
 		l.BaseDriver.Instance.Dir,
 		l.BaseDriver.Instance.Name,
 		distroName,
-		&errCh,
+		errCh,
 	); err != nil {
 		return nil, err
 	}
 
-	keepAlive(ctx, distroName, &errCh)
+	keepAlive(ctx, distroName, errCh)
 
 	return errCh, err
 }
@@ -144,12 +144,12 @@ func (l *LimaWslDriver) Start(ctx context.Context) (chan error, error) {
 // Requires WSLg, which requires specific version of WSL2 to be installed.
 // TODO: Add check and add support for WSLg (instead of VNC) to hostagent.
 func (l *LimaWslDriver) CanRunGUI() bool {
-	// return *l.Yaml.Video.Display == "wsl"
+	// return *l.InstConfig.Video.Display == "wsl"
 	return false
 }
 
 func (l *LimaWslDriver) RunGUI() error {
-	return fmt.Errorf("RunGUI is not support for the given driver '%s' and diplay '%s'", "wsl", *l.Yaml.Video.Display)
+	return fmt.Errorf("RunGUI is not supported for the given driver '%s' and display '%s'", "wsl", *l.Instance.Config.Video.Display)
 }
 
 func (l *LimaWslDriver) Stop(ctx context.Context) error {
@@ -173,6 +173,21 @@ func (l *LimaWslDriver) Unregister(ctx context.Context) error {
 	return nil
 }
 
-func (l *LimaWslDriver) GuestAgentConn(_ context.Context) (net.Conn, error) {
-	return vsock.Dial(2, uint32(l.VSockPort), nil)
+// GuestAgentConn returns the guest agent connection, or nil (if forwarded by ssh).
+// As of 08-01-2024, github.com/mdlayher/vsock does not natively support vsock on
+// Windows, so use the winio library to create the connection.
+func (l *LimaWslDriver) GuestAgentConn(ctx context.Context) (net.Conn, error) {
+	VMIDStr, err := windows.GetInstanceVMID(fmt.Sprintf("lima-%s", l.Instance.Name))
+	if err != nil {
+		return nil, err
+	}
+	VMIDGUID, err := guid.FromString(VMIDStr)
+	if err != nil {
+		return nil, err
+	}
+	sockAddr := &winio.HvsockAddr{
+		VMID:      VMIDGUID,
+		ServiceID: winio.VsockServiceID(uint32(l.VSockPort)),
+	}
+	return winio.Dial(ctx, sockAddr)
 }

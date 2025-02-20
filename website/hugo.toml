@@ -120,14 +120,10 @@ github_branch= "master"
 algolia_docsearch = false
 
 # Enable Lunr.js offline search
-offlineSearch = false
+offlineSearch = true
 
 # Enable syntax highlighting and copy buttons on code blocks with Prism
 prism_syntax_highlighting = false
-
-[[params.versions]]
-version = "master"
-url = "https://lima-vm.io"
 
 # User interface configuration
 [params.ui]
@@ -142,7 +138,7 @@ navbar_translucent_over_cover_disable = false
 # Enable to show the side bar menu in its compact state.
 sidebar_menu_compact = false
 # Set to true to hide the sidebar search box (the top nav search box will still be displayed if search is enabled)
-sidebar_search_disable = false
+sidebar_search_disable = true
 sidebar_menu_foldable = true
 ul_show = 1
 
@@ -185,6 +181,12 @@ enable = false
   name = "GitHub"
   url = "https://github.com/lima-vm/lima"
   pre = '<i class="fab fa-github"></i>'
+[[menus.main]]
+  name = "Community"
+  url = "/docs/community"
+[[menus.main]]
+  name = "Releases"
+  url = "https://github.com/lima-vm/lima/releases"  
 
 [module]
   # uncomment line below for temporary local development of module
@@ -205,11 +207,11 @@ enable = false
     source="docsy"
     target="content/docs/Reference"
     language="en"
-  # Import examples README.md from examples folder
+  # Import templates README.md from templates folder
   [[module.imports]]
     path="../.."
   [[module.imports.mounts]]
-    source="examples"
-    target="static/examples"
+    source="templates"
+    target="static/templates"
     language="en"
     includeFiles = "README.md"

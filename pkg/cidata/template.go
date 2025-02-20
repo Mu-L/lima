@@ -29,12 +29,14 @@ type Cert struct {
 }
 
 type Containerd struct {
-	System bool
-	User   bool
+	System  bool
+	User    bool
+	Archive string
 }
 type Network struct {
 	MACAddress string
 	Interface  string
+	Metric     uint32
 }
 type Mount struct {
 	Tag        string
@@ -53,16 +55,21 @@ type Disk struct {
 	FSArgs []string
 }
 type TemplateArgs struct {
+	Debug                           bool
 	Name                            string // instance name
+	Hostname                        string // instance hostname
 	IID                             string // instance id
 	User                            string // user name
+	Comment                         string // user information
 	Home                            string // home directory
-	UID                             int
+	Shell                           string // login shell
+	UID                             uint32
 	SSHPubKeys                      []string
 	Mounts                          []Mount
 	MountType                       string
 	Disks                           []Disk
 	GuestInstallPrefix              string
+	UpgradePackages                 bool
 	Containerd                      Containerd
 	Networks                        []Network
 	SlirpNICName                    string
@@ -72,6 +79,8 @@ type TemplateArgs struct {
 	UDPDNSLocalPort                 int
 	TCPDNSLocalPort                 int
 	Env                             map[string]string
+	Param                           map[string]string
+	BootScripts                     bool
 	DNSAddresses                    []string
 	CACerts                         CACerts
 	HostHomeMountPoint              string
@@ -81,16 +90,17 @@ type TemplateArgs struct {
 	SkipDefaultDependencyResolution bool
 	VMType                          string
 	VSockPort                       int
+	VirtioPort                      string
 	Plain                           bool
+	TimeZone                        string
 }
 
-func ValidateTemplateArgs(args TemplateArgs) error {
+func ValidateTemplateArgs(args *TemplateArgs) error {
 	if err := identifiers.Validate(args.Name); err != nil {
 		return err
 	}
-	if err := identifiers.Validate(args.User); err != nil {
-		return err
-	}
+	// args.User is intentionally not validated here; the user can override with any name they want
+	// limayaml.FillDefault will validate the default (local) username, but not an explicit setting
 	if args.User == "root" {
 		return errors.New("field User must not be \"root\"")
 	}
@@ -99,6 +109,9 @@ func ValidateTemplateArgs(args TemplateArgs) error {
 	}
 	if args.Home == "" {
 		return errors.New("field Home must be set")
+	}
+	if args.Shell == "" {
+		return errors.New("field Shell must be set")
 	}
 	if len(args.SSHPubKeys) == 0 {
 		return errors.New("field SSHPubKeys must be set")
@@ -112,7 +125,21 @@ func ValidateTemplateArgs(args TemplateArgs) error {
 	return nil
 }
 
-func ExecuteTemplate(args TemplateArgs) ([]iso9660util.Entry, error) {
+func ExecuteTemplateCloudConfig(args *TemplateArgs) ([]byte, error) {
+	if err := ValidateTemplateArgs(args); err != nil {
+		return nil, err
+	}
+
+	userData, err := templateFS.ReadFile(path.Join(templateFSRoot, "user-data"))
+	if err != nil {
+		return nil, err
+	}
+
+	cloudConfigYaml := string(userData)
+	return textutil.ExecuteTemplate(cloudConfigYaml, args)
+}
+
+func ExecuteTemplateCIDataISO(args *TemplateArgs) ([]iso9660util.Entry, error) {
 	if err := ValidateTemplateArgs(args); err != nil {
 		return nil, err
 	}

@@ -16,17 +16,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lima-vm/lima/pkg/driver"
-	"github.com/lima-vm/lima/pkg/driverutil"
-	"github.com/lima-vm/lima/pkg/networks"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/lima-vm/lima/pkg/cidata"
+	"github.com/lima-vm/lima/pkg/driver"
+	"github.com/lima-vm/lima/pkg/driverutil"
+	"github.com/lima-vm/lima/pkg/freeport"
 	guestagentapi "github.com/lima-vm/lima/pkg/guestagent/api"
 	guestagentclient "github.com/lima-vm/lima/pkg/guestagent/api/client"
 	hostagentapi "github.com/lima-vm/lima/pkg/hostagent/api"
 	"github.com/lima-vm/lima/pkg/hostagent/dns"
 	"github.com/lima-vm/lima/pkg/hostagent/events"
+	"github.com/lima-vm/lima/pkg/identifierutil"
 	"github.com/lima-vm/lima/pkg/limayaml"
+	"github.com/lima-vm/lima/pkg/networks"
+	"github.com/lima-vm/lima/pkg/osutil"
+	"github.com/lima-vm/lima/pkg/portfwd"
 	"github.com/lima-vm/lima/pkg/sshutil"
 	"github.com/lima-vm/lima/pkg/store"
 	"github.com/lima-vm/lima/pkg/store/filenames"
@@ -36,27 +42,30 @@ import (
 )
 
 type HostAgent struct {
-	y               *limayaml.LimaYAML
-	sshLocalPort    int
-	udpDNSLocalPort int
-	tcpDNSLocalPort int
-	instDir         string
-	instName        string
-	instSSHAddress  string
-	sshConfig       *ssh.SSHConfig
-	portForwarder   *portForwarder
-	onClose         []func() error // LIFO
+	instConfig        *limayaml.LimaYAML
+	sshLocalPort      int
+	udpDNSLocalPort   int
+	tcpDNSLocalPort   int
+	instDir           string
+	instName          string
+	instSSHAddress    string
+	sshConfig         *ssh.SSHConfig
+	portForwarder     *portForwarder
+	grpcPortForwarder *portfwd.Forwarder
+
+	onClose []func() error // LIFO
 
 	driver   driver.Driver
-	sigintCh chan os.Signal
+	signalCh chan os.Signal
 
 	eventEnc   *json.Encoder
 	eventEncMu sync.Mutex
 
-	vSockPort int
+	vSockPort  int
+	virtioPort string
 
 	clientMu sync.RWMutex
-	client   guestagentclient.GuestAgentClient
+	client   *guestagentclient.GuestAgentClient
 
 	guestAgentAliveCh     chan struct{} // closed on establishing the connection
 	guestAgentAliveChOnce sync.Once
@@ -78,7 +87,7 @@ func WithNerdctlArchive(s string) Opt {
 // New creates the HostAgent.
 //
 // stdout is for emitting JSON lines of Events.
-func New(instName string, stdout io.Writer, sigintCh chan os.Signal, opts ...Opt) (*HostAgent, error) {
+func New(instName string, stdout io.Writer, signalCh chan os.Signal, opts ...Opt) (*HostAgent, error) {
 	var o options
 	for _, f := range opts {
 		if err := f(&o); err != nil {
@@ -90,80 +99,109 @@ func New(instName string, stdout io.Writer, sigintCh chan os.Signal, opts ...Opt
 		return nil, err
 	}
 
-	y, err := inst.LoadYAML()
+	// inst.Config is loaded with FillDefault() already, so no need to care about nil pointers.
+	sshLocalPort, err := determineSSHLocalPort(*inst.Config.SSH.LocalPort, instName)
 	if err != nil {
 		return nil, err
 	}
-	// y is loaded with FillDefault() already, so no need to care about nil pointers.
-
-	sshLocalPort, err := determineSSHLocalPort(y, instName)
-	if err != nil {
-		return nil, err
-	}
-	if *y.VMType == limayaml.WSL2 {
+	if *inst.Config.VMType == limayaml.WSL2 {
 		sshLocalPort = inst.SSHLocalPort
 	}
 
 	var udpDNSLocalPort, tcpDNSLocalPort int
-	if *y.HostResolver.Enabled {
-		udpDNSLocalPort, err = findFreeUDPLocalPort()
+	if *inst.Config.HostResolver.Enabled {
+		udpDNSLocalPort, err = freeport.UDP()
 		if err != nil {
 			return nil, err
 		}
-		tcpDNSLocalPort, err = findFreeTCPLocalPort()
+		tcpDNSLocalPort, err = freeport.TCP()
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	vSockPort := 0
-	if *y.VMType == limayaml.VZ {
+	virtioPort := ""
+	if *inst.Config.VMType == limayaml.VZ {
 		vSockPort = 2222
-	} else if *y.VMType == limayaml.WSL2 {
-		port, err := getFreeVSockPort()
+	} else if *inst.Config.VMType == limayaml.WSL2 {
+		port, err := freeport.VSock()
 		if err != nil {
 			logrus.WithError(err).Error("failed to get free VSock port")
 		}
 		vSockPort = port
+	} else if *inst.Config.VMType == limayaml.QEMU {
+		// virtserialport doesn't seem to work reliably: https://github.com/lima-vm/lima/issues/2064
+		virtioPort = "" // filenames.VirtioPort
 	}
 
-	if err := cidata.GenerateISO9660(inst.Dir, instName, y, udpDNSLocalPort, tcpDNSLocalPort, o.nerdctlArchive, vSockPort); err != nil {
+	if err := cidata.GenerateCloudConfig(inst.Dir, instName, inst.Config); err != nil {
+		return nil, err
+	}
+	if err := cidata.GenerateISO9660(inst.Dir, instName, inst.Config, udpDNSLocalPort, tcpDNSLocalPort, o.nerdctlArchive, vSockPort, virtioPort); err != nil {
 		return nil, err
 	}
 
-	sshOpts, err := sshutil.SSHOpts(inst.Dir, *y.SSH.LoadDotSSHPubKeys, *y.SSH.ForwardAgent, *y.SSH.ForwardX11, *y.SSH.ForwardX11Trusted)
+	sshOpts, err := sshutil.SSHOpts(
+		"ssh",
+		inst.Dir,
+		*inst.Config.User.Name,
+		*inst.Config.SSH.LoadDotSSHPubKeys,
+		*inst.Config.SSH.ForwardAgent,
+		*inst.Config.SSH.ForwardX11,
+		*inst.Config.SSH.ForwardX11Trusted)
 	if err != nil {
 		return nil, err
 	}
-	if err = writeSSHConfigFile(inst, inst.SSHAddress, sshLocalPort, sshOpts); err != nil {
+	if err = writeSSHConfigFile("ssh", inst.Name, inst.Dir, inst.SSHAddress, sshLocalPort, sshOpts); err != nil {
 		return nil, err
 	}
 	sshConfig := &ssh.SSHConfig{
 		AdditionalArgs: sshutil.SSHArgsFromOpts(sshOpts),
 	}
 
-	rules := make([]limayaml.PortForward, 0, 3+len(y.PortForwards))
+	ignoreTCP := false
+	ignoreUDP := false
+	for _, rule := range inst.Config.PortForwards {
+		if rule.Ignore && rule.GuestPortRange[0] == 1 && rule.GuestPortRange[1] == 65535 {
+			switch rule.Proto {
+			case limayaml.ProtoTCP:
+				ignoreTCP = true
+				logrus.Info("TCP port forwarding is disabled (except for SSH)")
+			case limayaml.ProtoUDP:
+				ignoreUDP = true
+				logrus.Info("UDP port forwarding is disabled")
+			case limayaml.ProtoAny:
+				ignoreTCP = true
+				ignoreUDP = true
+				logrus.Info("TCP (except for SSH) and UDP port forwarding is disabled")
+			}
+		} else {
+			break
+		}
+	}
+	rules := make([]limayaml.PortForward, 0, 3+len(inst.Config.PortForwards))
 	// Block ports 22 and sshLocalPort on all IPs
 	for _, port := range []int{sshGuestPort, sshLocalPort} {
 		rule := limayaml.PortForward{GuestIP: net.IPv4zero, GuestPort: port, Ignore: true}
-		limayaml.FillPortForwardDefaults(&rule, inst.Dir)
+		limayaml.FillPortForwardDefaults(&rule, inst.Dir, inst.Config.User, inst.Param)
 		rules = append(rules, rule)
 	}
-	rules = append(rules, y.PortForwards...)
+	rules = append(rules, inst.Config.PortForwards...)
 	// Default forwards for all non-privileged ports from "127.0.0.1" and "::1"
-	rule := limayaml.PortForward{GuestIP: guestagentapi.IPv4loopback1}
-	limayaml.FillPortForwardDefaults(&rule, inst.Dir)
+	rule := limayaml.PortForward{}
+	limayaml.FillPortForwardDefaults(&rule, inst.Dir, inst.Config.User, inst.Param)
 	rules = append(rules, rule)
 
 	limaDriver := driverutil.CreateTargetDriverInstance(&driver.BaseDriver{
 		Instance:     inst,
-		Yaml:         y,
 		SSHLocalPort: sshLocalPort,
 		VSockPort:    vSockPort,
+		VirtioPort:   virtioPort,
 	})
 
 	a := &HostAgent{
-		y:                 y,
+		instConfig:        inst.Config,
 		sshLocalPort:      sshLocalPort,
 		udpDNSLocalPort:   udpDNSLocalPort,
 		tcpDNSLocalPort:   tcpDNSLocalPort,
@@ -171,19 +209,21 @@ func New(instName string, stdout io.Writer, sigintCh chan os.Signal, opts ...Opt
 		instName:          instName,
 		instSSHAddress:    inst.SSHAddress,
 		sshConfig:         sshConfig,
-		portForwarder:     newPortForwarder(sshConfig, sshLocalPort, rules, inst.VMType),
+		portForwarder:     newPortForwarder(sshConfig, sshLocalPort, rules, ignoreTCP, inst.VMType),
+		grpcPortForwarder: portfwd.NewPortForwarder(rules, ignoreTCP, ignoreUDP),
 		driver:            limaDriver,
-		sigintCh:          sigintCh,
+		signalCh:          signalCh,
 		eventEnc:          json.NewEncoder(stdout),
 		vSockPort:         vSockPort,
+		virtioPort:        virtioPort,
 		guestAgentAliveCh: make(chan struct{}),
 	}
 	return a, nil
 }
 
-func writeSSHConfigFile(inst *store.Instance, instSSHAddress string, sshLocalPort int, sshOpts []string) error {
-	if inst.Dir == "" {
-		return fmt.Errorf("directory is unknown for the instance %q", inst.Name)
+func writeSSHConfigFile(sshPath, instName, instDir, instSSHAddress string, sshLocalPort int, sshOpts []string) error {
+	if instDir == "" {
+		return fmt.Errorf("directory is unknown for the instance %q", instName)
 	}
 	var b bytes.Buffer
 	if _, err := fmt.Fprintf(&b, `# This SSH config file can be passed to 'ssh -F'.
@@ -192,79 +232,33 @@ func writeSSHConfigFile(inst *store.Instance, instSSHAddress string, sshLocalPor
 `); err != nil {
 		return err
 	}
-	if err := sshutil.Format(&b, inst.Name, sshutil.FormatConfig,
+	if err := sshutil.Format(&b, sshPath, instName, sshutil.FormatConfig,
 		append(sshOpts,
 			fmt.Sprintf("Hostname=%s", instSSHAddress),
 			fmt.Sprintf("Port=%d", sshLocalPort),
 		)); err != nil {
 		return err
 	}
-	fileName := filepath.Join(inst.Dir, filenames.SSHConfig)
+	fileName := filepath.Join(instDir, filenames.SSHConfig)
 	return os.WriteFile(fileName, b.Bytes(), 0o600)
 }
 
-func determineSSHLocalPort(y *limayaml.LimaYAML, instName string) (int, error) {
-	if *y.SSH.LocalPort > 0 {
-		return *y.SSH.LocalPort, nil
+func determineSSHLocalPort(confLocalPort int, instName string) (int, error) {
+	if confLocalPort > 0 {
+		return confLocalPort, nil
 	}
-	if *y.SSH.LocalPort < 0 {
-		return 0, fmt.Errorf("invalid ssh local port %d", y.SSH.LocalPort)
+	if confLocalPort < 0 {
+		return 0, fmt.Errorf("invalid ssh local port %d", confLocalPort)
 	}
-	switch instName {
-	case "default":
+	if instName == "default" {
 		// use hard-coded value for "default" instance, for backward compatibility
 		return 60022, nil
-	default:
-		sshLocalPort, err := findFreeTCPLocalPort()
-		if err != nil {
-			return 0, fmt.Errorf("failed to find a free port, try setting `ssh.localPort` manually: %w", err)
-		}
-		return sshLocalPort, nil
 	}
-}
-
-func findFreeTCPLocalPort() (int, error) {
-	lAddr0, err := net.ResolveTCPAddr("tcp4", "127.0.0.1:0")
+	sshLocalPort, err := freeport.TCP()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to find a free port, try setting `ssh.localPort` manually: %w", err)
 	}
-	l, err := net.ListenTCP("tcp4", lAddr0)
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	lAddr := l.Addr()
-	lTCPAddr, ok := lAddr.(*net.TCPAddr)
-	if !ok {
-		return 0, fmt.Errorf("expected *net.TCPAddr, got %v", lAddr)
-	}
-	port := lTCPAddr.Port
-	if port <= 0 {
-		return 0, fmt.Errorf("unexpected port %d", port)
-	}
-	return port, nil
-}
-
-func findFreeUDPLocalPort() (int, error) {
-	lAddr0, err := net.ResolveUDPAddr("udp4", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	l, err := net.ListenUDP("udp4", lAddr0)
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	lAddr := l.LocalAddr()
-	lUDPAddr, ok := lAddr.(*net.UDPAddr)
-	if !ok {
-		return 0, fmt.Errorf("expected *net.UDPAddr, got %v", lAddr)
-	}
-	port := lUDPAddr.Port
-	if port <= 0 {
-		return 0, fmt.Errorf("unexpected port %d", port)
-	}
-	return port, nil
+	return sshLocalPort, nil
 }
 
 func (a *HostAgent) emitEvent(_ context.Context, ev events.Event) {
@@ -294,17 +288,17 @@ func (a *HostAgent) Run(ctx context.Context) error {
 	}()
 	adjustNofileRlimit()
 
-	firstUsernetIndex := limayaml.FirstUsernetIndex(a.y)
-	if firstUsernetIndex == -1 && *a.y.HostResolver.Enabled {
-		hosts := a.y.HostResolver.Hosts
+	if limayaml.FirstUsernetIndex(a.instConfig) == -1 && *a.instConfig.HostResolver.Enabled {
+		hosts := a.instConfig.HostResolver.Hosts
 		hosts["host.lima.internal"] = networks.SlirpGateway
-		hosts[fmt.Sprintf("lima-%s", a.instName)] = networks.SlirpIPAddress
+		hostname := identifierutil.HostnameFromInstName(a.instName) // TODO: support customization
+		hosts[hostname] = networks.SlirpIPAddress
 		srvOpts := dns.ServerOptions{
 			UDPPort: a.udpDNSLocalPort,
 			TCPPort: a.tcpDNSLocalPort,
 			Address: "127.0.0.1",
 			HandlerOptions: dns.HandlerOptions{
-				IPv6:        *a.y.HostResolver.IPv6,
+				IPv6:        *a.instConfig.HostResolver.IPv6,
 				StaticHosts: hosts,
 			},
 		}
@@ -321,7 +315,7 @@ func (a *HostAgent) Run(ctx context.Context) error {
 	}
 
 	// WSL instance SSH address isn't known until after VM start
-	if *a.y.VMType == limayaml.WSL2 {
+	if *a.instConfig.VMType == limayaml.WSL2 {
 		sshAddr, err := store.GetSSHAddress(a.instName)
 		if err != nil {
 			return err
@@ -329,8 +323,8 @@ func (a *HostAgent) Run(ctx context.Context) error {
 		a.instSSHAddress = sshAddr
 	}
 
-	if a.y.Video.Display != nil && *a.y.Video.Display == "vnc" {
-		vncdisplay, vncoptions, _ := strings.Cut(*a.y.Video.VNC.Display, ",")
+	if a.instConfig.Video.Display != nil && *a.instConfig.Video.Display == "vnc" {
+		vncdisplay, vncoptions, _ := strings.Cut(*a.instConfig.Video.VNC.Display, ",")
 		vnchost, vncnum, err := net.SplitHostPort(vncdisplay)
 		if err != nil {
 			return err
@@ -385,7 +379,7 @@ func (a *HostAgent) Run(ctx context.Context) error {
 	return a.startRoutinesAndWait(ctx, errCh)
 }
 
-func (a *HostAgent) startRoutinesAndWait(ctx context.Context, errCh chan error) error {
+func (a *HostAgent) startRoutinesAndWait(ctx context.Context, errCh <-chan error) error {
 	stBase := events.Status{
 		SSHLocalPort: a.sshLocalPort,
 	}
@@ -411,8 +405,8 @@ func (a *HostAgent) startRoutinesAndWait(ctx context.Context, errCh chan error) 
 			}
 			err := a.driver.Stop(ctx)
 			return err
-		case <-a.sigintCh:
-			logrus.Info("Received SIGINT, shutting down the host agent")
+		case sig := <-a.signalCh:
+			logrus.Infof("Received %s, shutting down the host agent", osutil.SignalName(sig))
 			cancelHA()
 			if closeErr := a.close(); closeErr != nil {
 				logrus.WithError(closeErr).Warn("an error during shutting down the host agent")
@@ -431,7 +425,7 @@ func (a *HostAgent) Info(_ context.Context) (*hostagentapi.Info, error) {
 }
 
 func (a *HostAgent) startHostAgentRoutines(ctx context.Context) error {
-	if *a.y.Plain {
+	if *a.instConfig.Plain {
 		logrus.Info("Running in plain mode. Mounts, port forwarding, containerd, etc. will be ignored. Guest agent will not be running.")
 	}
 	a.onClose = append(a.onClose, func() error {
@@ -445,7 +439,7 @@ func (a *HostAgent) startHostAgentRoutines(ctx context.Context) error {
 	if err := a.waitForRequirements("essential", a.essentialRequirements()); err != nil {
 		errs = append(errs, err)
 	}
-	if *a.y.SSH.ForwardAgent {
+	if *a.instConfig.SSH.ForwardAgent {
 		faScript := `#!/bin/bash
 set -eux -o pipefail
 sudo mkdir -p -m 700 /run/host-services
@@ -458,7 +452,7 @@ sudo chown -R "${USER}" /run/host-services`
 			errs = append(errs, fmt.Errorf("stdout=%q, stderr=%q: %w", stdout, stderr, err))
 		}
 	}
-	if *a.y.MountType == limayaml.REVSSHFS && !*a.y.Plain {
+	if *a.instConfig.MountType == limayaml.REVSSHFS && !*a.instConfig.Plain {
 		mounts, err := a.setupMounts()
 		if err != nil {
 			errs = append(errs, err)
@@ -473,10 +467,10 @@ sudo chown -R "${USER}" /run/host-services`
 			return errors.Join(unmountErrs...)
 		})
 	}
-	if len(a.y.AdditionalDisks) > 0 {
+	if len(a.instConfig.AdditionalDisks) > 0 {
 		a.onClose = append(a.onClose, func() error {
 			var unlockErrs []error
-			for _, d := range a.y.AdditionalDisks {
+			for _, d := range a.instConfig.AdditionalDisks {
 				disk, inspectErr := store.InspectDisk(d.Name)
 				if inspectErr != nil {
 					unlockErrs = append(unlockErrs, inspectErr)
@@ -490,39 +484,33 @@ sudo chown -R "${USER}" /run/host-services`
 			return errors.Join(unlockErrs...)
 		})
 	}
-	if !*a.y.Plain {
+	if !*a.instConfig.Plain {
 		go a.watchGuestAgentEvents(ctx)
 	}
 	if err := a.waitForRequirements("optional", a.optionalRequirements()); err != nil {
 		errs = append(errs, err)
 	}
-	if !*a.y.Plain {
+	if !*a.instConfig.Plain {
 		logrus.Info("Waiting for the guest agent to be running")
 		select {
 		case <-a.guestAgentAliveCh:
 			// NOP
 		case <-time.After(time.Minute):
-			err := errors.New("guest agent does not seem to be running; port forwards will not work")
-			if *a.y.VMType == limayaml.WSL2 {
-				// geustagent is currently not available for WSL2: https://github.com/lima-vm/lima/issues/2025
-				logrus.Warn(err)
-			} else {
-				errs = append(errs, err)
-			}
+			errs = append(errs, errors.New("guest agent does not seem to be running; port forwards will not work"))
 		}
 	}
 	if err := a.waitForRequirements("final", a.finalRequirements()); err != nil {
 		errs = append(errs, err)
 	}
 	// Copy all config files _after_ the requirements are done
-	for _, rule := range a.y.CopyToHost {
+	for _, rule := range a.instConfig.CopyToHost {
 		if err := copyToHost(ctx, a.sshConfig, a.sshLocalPort, rule.HostFile, rule.GuestFile); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	a.onClose = append(a.onClose, func() error {
 		var rmErrs []error
-		for _, rule := range a.y.CopyToHost {
+		for _, rule := range a.instConfig.CopyToHost {
 			if rule.DeleteOnStop {
 				logrus.Infof("Deleting %s", rule.HostFile)
 				if err := os.RemoveAll(rule.HostFile); err != nil {
@@ -551,40 +539,70 @@ func (a *HostAgent) watchGuestAgentEvents(ctx context.Context) {
 	// TODO: use vSock (when QEMU for macOS gets support for vSock)
 
 	// Setup all socket forwards and defer their teardown
-	if *a.y.VMType != limayaml.WSL2 {
+	if *a.instConfig.VMType != limayaml.WSL2 {
 		logrus.Debugf("Forwarding unix sockets")
-		for _, rule := range a.y.PortForwards {
+		for _, rule := range a.instConfig.PortForwards {
 			if rule.GuestSocket != "" {
-				local := hostAddress(rule, guestagentapi.IPPort{})
+				local := hostAddress(rule, &guestagentapi.IPPort{})
 				_ = forwardSSH(ctx, a.sshConfig, a.sshLocalPort, local, rule.GuestSocket, verbForward, rule.Reverse)
 			}
 		}
 	}
 
+	localUnix := filepath.Join(a.instDir, filenames.GuestAgentSock)
+	remoteUnix := "/run/lima-guestagent.sock"
+
 	a.onClose = append(a.onClose, func() error {
 		logrus.Debugf("Stop forwarding unix sockets")
 		var errs []error
-		for _, rule := range a.y.PortForwards {
+		for _, rule := range a.instConfig.PortForwards {
 			if rule.GuestSocket != "" {
-				local := hostAddress(rule, guestagentapi.IPPort{})
+				local := hostAddress(rule, &guestagentapi.IPPort{})
 				// using ctx.Background() because ctx has already been cancelled
 				if err := forwardSSH(context.Background(), a.sshConfig, a.sshLocalPort, local, rule.GuestSocket, verbCancel, rule.Reverse); err != nil {
 					errs = append(errs, err)
 				}
 			}
 		}
+		if a.driver.ForwardGuestAgent() {
+			if err := forwardSSH(context.Background(), a.sshConfig, a.sshLocalPort, localUnix, remoteUnix, verbCancel, false); err != nil {
+				errs = append(errs, err)
+			}
+		}
 		return errors.Join(errs...)
 	})
+
+	go func() {
+		if a.instConfig.MountInotify != nil && *a.instConfig.MountInotify {
+			if a.client == nil || !isGuestAgentSocketAccessible(ctx, a.client) {
+				if a.driver.ForwardGuestAgent() {
+					_ = forwardSSH(ctx, a.sshConfig, a.sshLocalPort, localUnix, remoteUnix, verbForward, false)
+				}
+			}
+			err := a.startInotify(ctx)
+			if err != nil {
+				logrus.WithError(err).Warn("failed to start inotify")
+			}
+		}
+	}()
+
 	for {
+		if a.client == nil || !isGuestAgentSocketAccessible(ctx, a.client) {
+			if a.driver.ForwardGuestAgent() {
+				_ = forwardSSH(ctx, a.sshConfig, a.sshLocalPort, localUnix, remoteUnix, verbForward, false)
+			}
+		}
 		client, err := a.getOrCreateClient(ctx)
 		if err == nil {
 			if err := a.processGuestAgentEvents(ctx, client); err != nil {
 				if !errors.Is(err, context.Canceled) {
-					logrus.WithError(err).Warn("connection to the guest agent was closed unexpectedly", err)
+					logrus.WithError(err).Warn("guest agent events closed unexpectedly")
 				}
 			}
 		} else {
-			logrus.WithError(err).Warn("connection to the guest agent was closed unexpectedly", err)
+			if !strings.Contains(err.Error(), context.Canceled.Error()) {
+				logrus.WithError(err).Warn("connection to the guest agent was closed unexpectedly")
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -594,32 +612,33 @@ func (a *HostAgent) watchGuestAgentEvents(ctx context.Context) {
 	}
 }
 
-func isGuestAgentSocketAccessible(ctx context.Context, client guestagentclient.GuestAgentClient) bool {
+func isGuestAgentSocketAccessible(ctx context.Context, client *guestagentclient.GuestAgentClient) bool {
 	_, err := client.Info(ctx)
 	return err == nil
 }
 
-func (a *HostAgent) getOrCreateClient(ctx context.Context) (guestagentclient.GuestAgentClient, error) {
+func (a *HostAgent) getOrCreateClient(ctx context.Context) (*guestagentclient.GuestAgentClient, error) {
 	a.clientMu.Lock()
 	defer a.clientMu.Unlock()
 	if a.client != nil && isGuestAgentSocketAccessible(ctx, a.client) {
 		return a.client, nil
 	}
 	var err error
-	a.client, err = a.createClient(ctx)
+	a.client, err = guestagentclient.NewGuestAgentClient(a.createConnection)
 	return a.client, err
 }
 
-func (a *HostAgent) createClient(ctx context.Context) (guestagentclient.GuestAgentClient, error) {
+func (a *HostAgent) createConnection(ctx context.Context) (net.Conn, error) {
 	conn, err := a.driver.GuestAgentConn(ctx)
-	if err != nil {
-		return nil, err
+	// default to forwarded sock
+	if conn == nil && err == nil {
+		var d net.Dialer
+		conn, err = d.DialContext(ctx, "unix", filepath.Join(a.instDir, filenames.GuestAgentSock))
 	}
-
-	return guestagentclient.NewGuestAgentClient(conn)
+	return conn, err
 }
 
-func (a *HostAgent) processGuestAgentEvents(ctx context.Context, client guestagentclient.GuestAgentClient) error {
+func (a *HostAgent) processGuestAgentEvents(ctx context.Context, client *guestagentclient.GuestAgentClient) error {
 	info, err := client.Info(ctx)
 	if err != nil {
 		return err
@@ -631,15 +650,33 @@ func (a *HostAgent) processGuestAgentEvents(ctx context.Context, client guestage
 
 	logrus.Debugf("guest agent info: %+v", info)
 
-	onEvent := func(ev guestagentapi.Event) {
+	onEvent := func(ev *guestagentapi.Event) {
 		logrus.Debugf("guest agent event: %+v", ev)
 		for _, f := range ev.Errors {
 			logrus.Warnf("received error from the guest: %q", f)
 		}
-		a.portForwarder.OnEvent(ctx, ev, a.instSSHAddress)
+		// useSSHFwd was false by default in v1.0, but reverted to true by default in v1.0.1
+		// due to stability issues
+		useSSHFwd := true
+		if envVar := os.Getenv("LIMA_SSH_PORT_FORWARDER"); envVar != "" {
+			b, err := strconv.ParseBool(os.Getenv("LIMA_SSH_PORT_FORWARDER"))
+			if err != nil {
+				logrus.WithError(err).Warnf("invalid LIMA_SSH_PORT_FORWARDER value %q", envVar)
+			} else {
+				useSSHFwd = b
+			}
+		}
+		if useSSHFwd {
+			a.portForwarder.OnEvent(ctx, ev)
+		} else {
+			a.grpcPortForwarder.OnEvent(ctx, client, ev)
+		}
 	}
 
 	if err := client.Events(ctx, onEvent); err != nil {
+		if status.Code(err) == codes.Canceled {
+			return context.Canceled
+		}
 		return err
 	}
 	return io.EOF
@@ -665,7 +702,7 @@ func executeSSH(ctx context.Context, sshConfig *ssh.SSHConfig, port int, command
 	return nil
 }
 
-func forwardSSH(ctx context.Context, sshConfig *ssh.SSHConfig, port int, local, remote string, verb string, reverse bool) error {
+func forwardSSH(ctx context.Context, sshConfig *ssh.SSHConfig, port int, local, remote, verb string, reverse bool) error {
 	args := sshConfig.Args()
 	args = append(args,
 		"-T",
@@ -732,7 +769,7 @@ func forwardSSH(ctx context.Context, sshConfig *ssh.SSHConfig, port int, local, 
 				}
 			} else {
 				logrus.WithError(err).Warnf("Failed to set up forward from %q (guest) to %q (host)", remote, local)
-				if removeErr := os.RemoveAll(local); err != nil {
+				if removeErr := os.RemoveAll(local); removeErr != nil {
 					logrus.WithError(removeErr).Warnf("Failed to clean up %q (host) after forwarding failed", local)
 				}
 			}

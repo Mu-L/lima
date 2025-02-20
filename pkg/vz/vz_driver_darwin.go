@@ -37,10 +37,15 @@ var knownYamlProperties = []string{
 	"Images",
 	"Memory",
 	"Message",
+	"MinimumLimaVersion",
 	"Mounts",
 	"MountType",
+	"MountTypesUnsupported",
+	"MountInotify",
+	"NestedVirtualization",
 	"Networks",
 	"OS",
+	"Param",
 	"Plain",
 	"PortForwards",
 	"Probes",
@@ -48,6 +53,9 @@ var knownYamlProperties = []string{
 	"Provision",
 	"Rosetta",
 	"SSH",
+	"TimeZone",
+	"UpgradePackages",
+	"User",
 	"Video",
 	"VMType",
 }
@@ -70,62 +78,73 @@ func (l *LimaVzDriver) Validate() error {
 	// Calling NewEFIBootLoader to do required version check for latest APIs
 	_, err := vz.NewEFIBootLoader()
 	if errors.Is(err, vz.ErrUnsupportedOSVersion) {
-		return fmt.Errorf("VZ driver requires macOS 13 or higher to run")
+		return errors.New("VZ driver requires macOS 13 or higher to run")
 	}
-	if *l.Yaml.MountType == limayaml.NINEP {
-		return fmt.Errorf("field `mountType` must be %q or %q for VZ driver , got %q", limayaml.REVSSHFS, limayaml.VIRTIOFS, *l.Yaml.MountType)
+	if *l.Instance.Config.MountType == limayaml.NINEP {
+		return fmt.Errorf("field `mountType` must be %q or %q for VZ driver , got %q", limayaml.REVSSHFS, limayaml.VIRTIOFS, *l.Instance.Config.MountType)
 	}
-	if *l.Yaml.Firmware.LegacyBIOS {
-		return fmt.Errorf("`firmware.legacyBIOS` configuration is not supported for VZ driver")
+	if *l.Instance.Config.Firmware.LegacyBIOS {
+		logrus.Warnf("vmType %s: ignoring `firmware.legacyBIOS`", *l.Instance.Config.VMType)
 	}
-	if unknown := reflectutil.UnknownNonEmptyFields(l.Yaml, knownYamlProperties...); len(unknown) > 0 {
-		logrus.Warnf("vmType %s: ignoring %+v", *l.Yaml.VMType, unknown)
+	for _, f := range l.Instance.Config.Firmware.Images {
+		switch f.VMType {
+		case "", limayaml.VZ:
+			if f.Arch == *l.Instance.Config.Arch {
+				return errors.New("`firmware.images` configuration is not supported for VZ driver")
+			}
+		}
+	}
+	if unknown := reflectutil.UnknownNonEmptyFields(l.Instance.Config, knownYamlProperties...); len(unknown) > 0 {
+		logrus.Warnf("vmType %s: ignoring %+v", *l.Instance.Config.VMType, unknown)
 	}
 
-	if !limayaml.IsNativeArch(*l.Yaml.Arch) {
-		return fmt.Errorf("unsupported arch: %q", *l.Yaml.Arch)
+	if !limayaml.IsNativeArch(*l.Instance.Config.Arch) {
+		return fmt.Errorf("unsupported arch: %q", *l.Instance.Config.Arch)
 	}
 
-	for k, v := range l.Yaml.CPUType {
+	for k, v := range l.Instance.Config.CPUType {
 		if v != "" {
-			logrus.Warnf("vmType %s: ignoring cpuType[%q]: %q", *l.Yaml.VMType, k, v)
+			logrus.Warnf("vmType %s: ignoring cpuType[%q]: %q", *l.Instance.Config.VMType, k, v)
 		}
 	}
 
-	for i, image := range l.Yaml.Images {
+	for i, image := range l.Instance.Config.Images {
 		if unknown := reflectutil.UnknownNonEmptyFields(image, "File"); len(unknown) > 0 {
-			logrus.Warnf("vmType %s: ignoring images[%d]: %+v", *l.Yaml.VMType, i, unknown)
+			logrus.Warnf("vmType %s: ignoring images[%d]: %+v", *l.Instance.Config.VMType, i, unknown)
 		}
 	}
 
-	for i, mount := range l.Yaml.Mounts {
+	for i, mount := range l.Instance.Config.Mounts {
 		if unknown := reflectutil.UnknownNonEmptyFields(mount, "Location",
 			"MountPoint",
 			"Writable",
 			"SSHFS",
 			"NineP",
 		); len(unknown) > 0 {
-			logrus.Warnf("vmType %s: ignoring mounts[%d]: %+v", *l.Yaml.VMType, i, unknown)
+			logrus.Warnf("vmType %s: ignoring mounts[%d]: %+v", *l.Instance.Config.VMType, i, unknown)
 		}
 	}
 
-	for i, network := range l.Yaml.Networks {
+	for i, network := range l.Instance.Config.Networks {
 		if unknown := reflectutil.UnknownNonEmptyFields(network, "VZNAT",
 			"Lima",
 			"Socket",
 			"MACAddress",
+			"Metric",
 			"Interface",
 		); len(unknown) > 0 {
-			logrus.Warnf("vmType %s: ignoring networks[%d]: %+v", *l.Yaml.VMType, i, unknown)
+			logrus.Warnf("vmType %s: ignoring networks[%d]: %+v", *l.Instance.Config.VMType, i, unknown)
 		}
 	}
 
-	audioDevice := *l.Yaml.Audio.Device
-	if audioDevice != "" && audioDevice != "vz" {
-		logrus.Warnf("field `audio.device` must be %q for VZ driver , got %q", "vz", audioDevice)
+	switch audioDevice := *l.Instance.Config.Audio.Device; audioDevice {
+	case "":
+	case "vz", "default", "none":
+	default:
+		logrus.Warnf("field `audio.device` must be \"vz\", \"default\", or \"none\" for VZ driver, got %q", audioDevice)
 	}
 
-	switch videoDisplay := *l.Yaml.Video.Display; videoDisplay {
+	switch videoDisplay := *l.Instance.Config.Video.Display; videoDisplay {
 	case "vz", "default", "none":
 	default:
 		logrus.Warnf("field `video.display` must be \"vz\", \"default\", or \"none\" for VZ driver , got %q", videoDisplay)
@@ -138,8 +157,8 @@ func (l *LimaVzDriver) Initialize(_ context.Context) error {
 	return err
 }
 
-func (l *LimaVzDriver) CreateDisk() error {
-	return EnsureDisk(l.BaseDriver)
+func (l *LimaVzDriver) CreateDisk(ctx context.Context) error {
+	return EnsureDisk(ctx, l.BaseDriver)
 }
 
 func (l *LimaVzDriver) Start(ctx context.Context) (chan error, error) {
@@ -147,7 +166,7 @@ func (l *LimaVzDriver) Start(ctx context.Context) (chan error, error) {
 	vm, errCh, err := startVM(ctx, l.BaseDriver)
 	if err != nil {
 		if errors.Is(err, vz.ErrUnsupportedOSVersion) {
-			return nil, fmt.Errorf("vz driver requires macOS 13 or higher to run: %q", err)
+			return nil, fmt.Errorf("vz driver requires macOS 13 or higher to run: %w", err)
 		}
 		return nil, err
 	}
@@ -157,7 +176,7 @@ func (l *LimaVzDriver) Start(ctx context.Context) (chan error, error) {
 }
 
 func (l *LimaVzDriver) CanRunGUI() bool {
-	switch *l.Yaml.Video.Display {
+	switch *l.Instance.Config.Video.Display {
 	case "vz", "default":
 		return true
 	default:
@@ -169,7 +188,8 @@ func (l *LimaVzDriver) RunGUI() error {
 	if l.CanRunGUI() {
 		return l.machine.StartGraphicApplication(1920, 1200)
 	}
-	return fmt.Errorf("RunGUI is not support for the given driver '%s' and diplay '%s'", "vz", *l.Yaml.Video.Display)
+	//nolint:revive // error-strings
+	return fmt.Errorf("RunGUI is not supported for the given driver '%s' and display '%s'", "vz", *l.Instance.Config.Video.Display)
 }
 
 func (l *LimaVzDriver) Stop(_ context.Context) error {
@@ -209,5 +229,5 @@ func (l *LimaVzDriver) GuestAgentConn(_ context.Context) (net.Conn, error) {
 			return connect, nil
 		}
 	}
-	return nil, fmt.Errorf("unable to connect to guest agent via vsock port 2222")
+	return nil, errors.New("unable to connect to guest agent via vsock port 2222")
 }

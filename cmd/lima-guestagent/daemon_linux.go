@@ -3,15 +3,13 @@ package main
 import (
 	"errors"
 	"net"
-	"net/http"
 	"os"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/lima-vm/lima/pkg/guestagent"
 	"github.com/lima-vm/lima/pkg/guestagent/api/server"
 	"github.com/lima-vm/lima/pkg/guestagent/serialport"
-	"github.com/lima-vm/lima/pkg/store/filenames"
+	"github.com/lima-vm/lima/pkg/portfwdserver"
 	"github.com/mdlayher/vsock"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -25,27 +23,29 @@ func newDaemonCommand() *cobra.Command {
 	}
 	daemonCommand.Flags().Duration("tick", 3*time.Second, "tick for polling events")
 	daemonCommand.Flags().Int("vsock-port", 0, "use vsock server instead a UNIX socket")
+	daemonCommand.Flags().String("virtio-port", "", "use virtio server instead a UNIX socket")
 	return daemonCommand
 }
 
 func daemonAction(cmd *cobra.Command, _ []string) error {
+	socket := "/run/lima-guestagent.sock"
 	tick, err := cmd.Flags().GetDuration("tick")
 	if err != nil {
 		return err
 	}
-	vSockPortOverride, err := cmd.Flags().GetInt("vsock-port")
+	vSockPort, err := cmd.Flags().GetInt("vsock-port")
 	if err != nil {
 		return err
 	}
-	vSockPort := 0
-	if vSockPortOverride != 0 {
-		vSockPort = vSockPortOverride
+	virtioPort, err := cmd.Flags().GetString("virtio-port")
+	if err != nil {
+		return err
 	}
 	if tick == 0 {
 		return errors.New("tick must be specified")
 	}
 	if os.Geteuid() != 0 {
-		return errors.New("must run as the root")
+		return errors.New("must run as the root user")
 	}
 	logrus.Infof("event tick: %v", tick)
 
@@ -61,17 +61,14 @@ func daemonAction(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	backend := &server.Backend{
-		Agent: agent,
+	err = os.RemoveAll(socket)
+	if err != nil {
+		return err
 	}
-	r := mux.NewRouter()
-	server.AddRoutes(r, backend)
-	srv := &http.Server{Handler: r}
 
 	var l net.Listener
-	virtioPort := "/dev/virtio-ports/" + filenames.VirtioPort
-	if _, err := os.Stat(virtioPort); err == nil {
-		qemuL, err := serialport.Listen(virtioPort)
+	if virtioPort != "" {
+		qemuL, err := serialport.Listen("/dev/virtio-ports/" + virtioPort)
 		if err != nil {
 			return err
 		}
@@ -84,6 +81,16 @@ func daemonAction(cmd *cobra.Command, _ []string) error {
 		}
 		l = vsockL
 		logrus.Infof("serving the guest agent on vsock port: %d", vSockPort)
+	} else {
+		socketL, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(socket, 0o777); err != nil {
+			return err
+		}
+		l = socketL
+		logrus.Infof("serving the guest agent on %q", socket)
 	}
-	return srv.Serve(l)
+	return server.StartServer(l, &server.GuestServer{Agent: agent, TunnelS: portfwdserver.NewTunnelServer()})
 }

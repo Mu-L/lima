@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,8 +23,9 @@ import (
 type Protocol string
 
 const (
-	// UDP/SCTP when lima port forwarding works on those protocols
-	TCP Protocol = "TCP"
+	// UDP/SCTP when lima port forwarding works on those protocols.
+
+	TCP Protocol = "tcp"
 )
 
 type Entry struct {
@@ -54,6 +56,7 @@ func (s *ServiceWatcher) getServiceInformer() cache.SharedIndexInformer {
 }
 
 func (s *ServiceWatcher) Start() {
+	logrus.Info("Monitoring kubernetes services")
 	const retryInterval = 10 * time.Second
 	const pollImmediately = false
 	_ = wait.PollUntilContextCancel(context.TODO(), retryInterval, pollImmediately, func(ctx context.Context) (done bool, err error) {
@@ -141,7 +144,7 @@ func (s *ServiceWatcher) GetPorts() []Entry {
 			}
 
 			entries = append(entries, Entry{
-				Protocol: Protocol(portEntry.Protocol),
+				Protocol: Protocol(strings.ToLower(string(portEntry.Protocol))),
 				IP:       net.ParseIP("0.0.0.0"),
 				Port:     uint16(port),
 			})

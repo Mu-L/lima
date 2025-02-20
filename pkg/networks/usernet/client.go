@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	gvproxyclient "github.com/containers/gvisor-tap-vsock/pkg/client"
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/lima-vm/lima/pkg/driver"
+	"github.com/lima-vm/lima/pkg/httpclientutil"
 	"github.com/lima-vm/lima/pkg/limayaml"
 	"github.com/lima-vm/lima/pkg/networks/usernet/dnshosts"
 )
@@ -25,9 +28,9 @@ type Client struct {
 	subnet   net.IP
 }
 
-func (c *Client) ConfigureDriver(driver *driver.BaseDriver) error {
+func (c *Client) ConfigureDriver(ctx context.Context, driver *driver.BaseDriver) error {
 	macAddress := limayaml.MACAddress(driver.Instance.Dir)
-	ipAddress, err := c.ResolveIPAddress(macAddress)
+	ipAddress, err := c.ResolveIPAddress(ctx, macAddress)
 	if err != nil {
 		return err
 	}
@@ -35,8 +38,8 @@ func (c *Client) ConfigureDriver(driver *driver.BaseDriver) error {
 	if err != nil {
 		return err
 	}
-	hosts := driver.Yaml.HostResolver.Hosts
-	hosts[fmt.Sprintf("lima-%s.internal", driver.Instance.Name)] = ipAddress
+	hosts := driver.Instance.Config.HostResolver.Hosts
+	hosts[fmt.Sprintf("%s.internal", driver.Instance.Hostname)] = ipAddress
 	err = c.AddDNSHosts(hosts)
 	return err
 }
@@ -72,15 +75,23 @@ func (c *Client) ResolveAndForwardSSH(ipAddr string, sshPort int) error {
 	return nil
 }
 
-func (c *Client) ResolveIPAddress(vmMacAddr string) (string, error) {
-	timeout := time.After(2 * time.Minute)
+func (c *Client) ResolveIPAddress(ctx context.Context, vmMacAddr string) (string, error) {
+	resolveIPAddressTimeout := 2 * time.Minute
+	resolveIPAddressTimeoutEnv := os.Getenv("LIMA_USERNET_RESOLVE_IP_ADDRESS_TIMEOUT")
+	if resolveIPAddressTimeoutEnv != "" {
+		if parsedTimeout, err := strconv.Atoi(resolveIPAddressTimeoutEnv); err == nil {
+			resolveIPAddressTimeout = time.Duration(parsedTimeout) * time.Minute
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, resolveIPAddressTimeout)
+	defer cancel()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	for {
 		select {
-		case <-timeout:
+		case <-ctx.Done():
 			return "", errors.New("usernet unable to resolve IP for SSH forwarding")
 		case <-ticker.C:
-			leases, err := c.Leases()
+			leases, err := c.Leases(ctx)
 			if err != nil {
 				return "", err
 			}
@@ -94,15 +105,13 @@ func (c *Client) ResolveIPAddress(vmMacAddr string) (string, error) {
 	}
 }
 
-func (c *Client) Leases() (map[string]string, error) {
-	res, err := c.client.Get(fmt.Sprintf("%s%s", c.base, "/services/dhcp/leases"))
+func (c *Client) Leases(ctx context.Context) (map[string]string, error) {
+	u := fmt.Sprintf("%s%s", c.base, "/services/dhcp/leases")
+	res, err := httpclientutil.Get(ctx, c.client, u)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
-	}
 	dec := json.NewDecoder(res.Body)
 	var leases map[string]string
 	if err := dec.Decode(&leases); err != nil {
@@ -130,8 +139,9 @@ func NewClient(endpointSock string, subnet net.IP) *Client {
 func create(sock string, subnet net.IP, base string) *Client {
 	client := &http.Client{
 		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return net.Dial("unix", sock)
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
 			},
 		},
 	}

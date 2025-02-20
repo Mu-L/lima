@@ -34,13 +34,18 @@ declare -A CHECKS=(
 	["vmnet"]=""
 	["disk"]=""
 	["user-v2"]=""
+	["mount-path-with-spaces"]=""
+	["provision-ansible"]=""
+	["param-env-variables"]=""
+	["set-user"]=""
 )
 
 case "$NAME" in
-"alpine")
+"alpine"*)
 	WARNING "Alpine does not support systemd"
 	CHECKS["systemd"]=
 	CHECKS["container-engine"]=
+	[ "$NAME" = "alpine-iso-9p-writable" ] && CHECKS["mount-path-with-spaces"]="1"
 	;;
 "k3s")
 	ERROR "File \"$FILE\" is not testable with this script"
@@ -52,17 +57,14 @@ case "$NAME" in
 	# ● run-r2b459797f5b04262bfa79984077a65c7.service                                       loaded failed failed    /usr/bin/systemctl start man-db-cache-update
 	CHECKS["systemd-strict"]=
 	;;
-"vmnet")
-	CHECKS["vmnet"]=1
-	;;
 "test-misc")
 	CHECKS["disk"]=1
 	CHECKS["snapshot-online"]="1"
 	CHECKS["snapshot-offline"]="1"
-	;;
-"net-user-v2")
-	CHECKS["port-forwards"]=""
-	CHECKS["user-v2"]=1
+	CHECKS["mount-path-with-spaces"]="1"
+	CHECKS["provision-ansible"]="1"
+	CHECKS["param-env-variables"]="1"
+	CHECKS["set-user"]="1"
 	;;
 "docker")
 	CONTAINER_ENGINE="docker"
@@ -73,6 +75,22 @@ if limactl ls -q | grep -q "$NAME"; then
 	ERROR "Instance $NAME already exists"
 	exit 1
 fi
+
+# Create ${NAME}-tmp to inspect the enabled features.
+# TODO: skip downloading and converting the image here.
+# Probably `limactl create` should have "dry run" mode that just generates `lima.yaml`.
+# shellcheck disable=SC2086
+"${LIMACTL_CREATE[@]}" ${LIMACTL_CREATE_ARGS} --set ".additionalDisks=null" --name="${NAME}-tmp" "$FILE"
+case "$(yq '.networks[].lima' "${LIMA_HOME}/${NAME}-tmp/lima.yaml")" in
+"shared")
+	CHECKS["vmnet"]=1
+	;;
+"user-v2")
+	CHECKS["port-forwards"]=""
+	CHECKS["user-v2"]=1
+	;;
+esac
+limactl rm -f "${NAME}-tmp"
 
 if [[ -n ${CHECKS["port-forwards"]} ]]; then
 	tmpconfig="$HOME/lima-config-tmp"
@@ -92,7 +110,9 @@ function diagnose() {
 	tail "$HOME/.lima/${NAME}"/*.log
 	limactl shell "$NAME" systemctl --no-pager status
 	limactl shell "$NAME" systemctl --no-pager
-	limactl shell "$NAME" sudo cat /var/log/cloud-init-output.log
+	mkdir -p failure-logs
+	cp -pf "$HOME/.lima/${NAME}"/*.log failure-logs/
+	limactl shell "$NAME" sudo cat /var/log/cloud-init-output.log | tee failure-logs/cloud-init-output.log
 	set +x -e
 }
 
@@ -113,6 +133,11 @@ set -x
 "${LIMACTL_CREATE[@]}" ${LIMACTL_CREATE_ARGS} "$FILE"
 set +x
 
+if [[ -n ${CHECKS["mount-path-with-spaces"]} ]]; then
+	mkdir -p "/tmp/lima test dir with spaces"
+	echo "test file content" >"/tmp/lima test dir with spaces/test file"
+fi
+
 INFO "Starting \"$NAME\""
 set -x
 if ! limactl start "$NAME"; then
@@ -125,6 +150,34 @@ limactl shell "$NAME" uname -a
 
 limactl shell "$NAME" cat /etc/os-release
 set +x
+
+INFO "Testing that host home is not wiped out"
+[ -e "$HOME/.lima" ]
+
+if [[ -n ${CHECKS["mount-path-with-spaces"]} ]]; then
+	INFO 'Testing that "/tmp/lima test dir with spaces" is not wiped out'
+	[ "$(cat "/tmp/lima test dir with spaces/test file")" = "test file content" ]
+	[ "$(limactl shell "$NAME" cat "/tmp/lima test dir with spaces/test file")" = "test file content" ]
+fi
+
+if [[ -n ${CHECKS["provision-ansible"]} ]]; then
+	INFO 'Testing that /tmp/ansible was created successfully on provision'
+	limactl shell "$NAME" test -e /tmp/ansible
+fi
+
+if [[ -n ${CHECKS["param-env-variables"]} ]]; then
+	INFO 'Testing that PARAM env variables are exported to all types of provisioning scripts and probes'
+	limactl shell "$NAME" test -e /tmp/param-boot
+	limactl shell "$NAME" test -e /tmp/param-dependency
+	limactl shell "$NAME" test -e /tmp/param-probe
+	limactl shell "$NAME" test -e /tmp/param-system
+	limactl shell "$NAME" test -e /tmp/param-user
+fi
+
+if [[ -n ${CHECKS["set-user"]} ]]; then
+	INFO 'Testing that user settings can be provided by lima.yaml'
+	limactl shell "$NAME" grep "^john:x:4711:4711:John Doe:/home/john-john" /etc/passwd
+fi
 
 INFO "Testing proxy settings are imported"
 got=$(limactl shell "$NAME" env | grep FTP_PROXY)
@@ -139,10 +192,11 @@ if [ "$got" != "$expected" ]; then
 fi
 
 INFO "Testing limactl copy command"
-tmpfile="$HOME/lima-hostname"
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}"/lima-test-templates.XXXXXX)"
+defer "rm -rf \"$tmpdir\""
+tmpfile="$tmpdir/lima-hostname"
 rm -f "$tmpfile"
 limactl cp "$NAME":/etc/hostname "$tmpfile"
-defer "rm -f \"$tmpfile\""
 expected="$(limactl shell "$NAME" cat /etc/hostname)"
 got="$(cat "$tmpfile")"
 INFO "/etc/hostname: expected=${expected}, got=${got}"
@@ -232,8 +286,8 @@ if [[ -n ${CHECKS["port-forwards"]} ]]; then
 	fi
 	"${scriptdir}/test-port-forwarding.pl" "${NAME}"
 
-	if [[ -n ${CHECKS["container-engine"]} || ${NAME} == "alpine" ]]; then
-		INFO "Testing that \"${CONTAINER_ENGINE} run\" binds to 0.0.0.0 by default and is forwarded to the host"
+	if [[ -n ${CHECKS["container-engine"]} || ${NAME} == "alpine"* ]]; then
+		INFO "Testing that \"${CONTAINER_ENGINE} run\" binds to 0.0.0.0 and is forwarded to the host (non-default behavior, configured via test-port-forwarding.pl)"
 		if [ "$(uname)" = "Darwin" ]; then
 			# macOS runners seem to use `localhost` as the hostname, so the perl lookup just returns `127.0.0.1`
 			hostip=$(system_profiler SPNetworkDataType -json | jq -r 'first(.SPNetworkDataType[] | select(.ip_address) | .ip_address) | first')
@@ -242,7 +296,7 @@ if [[ -n ${CHECKS["port-forwards"]} ]]; then
 		fi
 		if [ -n "${hostip}" ]; then
 			sudo=""
-			if [ "${NAME}" = "alpine" ]; then
+			if [[ ${NAME} == "alpine"* ]]; then
 				arch=$(limactl info | jq -r .defaultTemplate.arch)
 				nerdctl=$(limactl info | jq -r ".defaultTemplate.containerd.archives[] | select(.arch==\"$arch\").location")
 				curl -Lso nerdctl-full.tgz "${nerdctl}"
@@ -254,9 +308,17 @@ if [[ -n ${CHECKS["port-forwards"]} ]]; then
 			fi
 			limactl shell "$NAME" $sudo $CONTAINER_ENGINE info
 			limactl shell "$NAME" $sudo $CONTAINER_ENGINE pull --quiet ${nginx_image}
-			limactl shell "$NAME" $sudo $CONTAINER_ENGINE run -d --name nginx -p 8888:80 ${nginx_image}
 
+			limactl shell "$NAME" $sudo $CONTAINER_ENGINE run -d --name nginx -p 8888:80 ${nginx_image}
 			timeout 3m bash -euxc "until curl -f --retry 30 --retry-connrefused http://${hostip}:8888; do sleep 3; done"
+			limactl shell "$NAME" $sudo $CONTAINER_ENGINE rm -f nginx
+
+			if [ "$(uname)" = "Darwin" ]; then
+				# Only macOS can bind to port 80 without root
+				limactl shell "$NAME" $sudo $CONTAINER_ENGINE run -d --name nginx -p 127.0.0.1:80:80 ${nginx_image}
+				timeout 3m bash -euxc "until curl -f --retry 30 --retry-connrefused http://localhost:80; do sleep 3; done"
+				limactl shell "$NAME" $sudo $CONTAINER_ENGINE rm -f nginx
+			fi
 		fi
 	fi
 	set +x
@@ -273,7 +335,7 @@ if [[ -n ${CHECKS["vmnet"]} ]]; then
 	set -x
 	limactl shell "$NAME" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3
 	limactl shell "$NAME" iperf3 -s -1 -D
-	iperf3 -c "$guestip"
+	${IPERF3} -c "$guestip"
 	set +x
 	# NOTE: we only test the shared interface here, as the bridged interface cannot be used on GHA (and systemd-networkd-wait-online.service will fail)
 fi
@@ -308,7 +370,11 @@ if [[ -n ${CHECKS["restart"]} ]]; then
 
 	export ftp_proxy=my.proxy:8021
 	INFO "Restarting \"$NAME\""
-	limactl start "$NAME"
+	if ! limactl start "$NAME"; then
+		ERROR "Failed to start \"$NAME\""
+		diagnose "$NAME"
+		exit 1
+	fi
 
 	INFO "Make sure proxy setting is updated"
 	got=$(limactl shell "$NAME" env | grep FTP_PROXY)
@@ -340,8 +406,12 @@ fi
 if [[ -n ${CHECKS["user-v2"]} ]]; then
 	INFO "Testing user-v2 network"
 	secondvm="$NAME-1"
-	"${LIMACTL_CREATE[@]}" "$FILE" --name "$secondvm"
-	limactl start "$secondvm"
+	"${LIMACTL_CREATE[@]}" --set ".additionalDisks=null" "$FILE" --name "$secondvm"
+	if ! limactl start "$secondvm"; then
+		ERROR "Failed to start \"$secondvm\""
+		diagnose "$secondvm"
+		exit 1
+	fi
 	secondvmDNS="lima-$secondvm.internal"
 	INFO "DNS of $secondvm is $secondvmDNS"
 	set -x
@@ -409,3 +479,7 @@ sleep 3
 
 INFO "Deleting \"$NAME\""
 limactl delete "$NAME"
+
+if [[ -n ${CHECKS["mount-path-with-spaces"]} ]]; then
+	rm -rf "/tmp/lima test dir with spaces"
+fi

@@ -10,7 +10,6 @@ import (
 
 	"github.com/cheggaaa/pb/v3/termutil"
 	"github.com/lima-vm/lima/pkg/store"
-	"github.com/lithammer/dedent"
 	"github.com/mattn/go-isatty"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -38,20 +37,21 @@ func newListCommand() *cobra.Command {
 		Use:     "list [flags] [INSTANCE]...",
 		Aliases: []string{"ls"},
 		Short:   "List instances of Lima.",
-		Long: "List instances of Lima.\n" + dedent.Dedent(`
-		The output can be presented in one of several formats, using the --format <format> flag.
+		Long: `List instances of Lima.
 
-		  --format json  - output in json format
-		  --format yaml  - output in yaml format
-		  --format table - output in table format
-		  --format '{{ <go template> }}' - if the format begins and ends with '{{ }}', then it is used as a go template.
-`) + store.FormatHelp + dedent.Dedent(`
-		The following legacy flags continue to function:
-		  --json - equal to '--format json'
-		`),
+The output can be presented in one of several formats, using the --format <format> flag.
+
+  --format json  - output in json format
+  --format yaml  - output in yaml format
+  --format table - output in table format
+  --format '{{ <go template> }}' - if the format begins and ends with '{{ }}', then it is used as a go template.
+` + store.FormatHelp + `
+The following legacy flags continue to function:
+  --json - equal to '--format json'`,
 		Args:              WrapArgsError(cobra.ArbitraryArgs),
 		RunE:              listAction,
 		ValidArgsFunction: listBashComplete,
+		GroupID:           basicCommand,
 	}
 
 	listCommand.Flags().StringP("format", "f", "table", "output format, one of: json, yaml, table, go-template")
@@ -71,6 +71,19 @@ func instanceMatches(arg string, instances []string) []string {
 		}
 	}
 	return matches
+}
+
+// unmatchedInstancesError is created when unmatched instance names found.
+type unmatchedInstancesError struct{}
+
+// Error implements error.
+func (unmatchedInstancesError) Error() string {
+	return "unmatched instances"
+}
+
+// ExitCode implements ExitCoder.
+func (unmatchedInstancesError) ExitCode() int {
+	return 1
 }
 
 func listAction(cmd *cobra.Command, args []string) error {
@@ -110,8 +123,12 @@ func listAction(cmd *cobra.Command, args []string) error {
 	if listFields {
 		names := fieldNames()
 		sort.Strings(names)
-		fmt.Println(strings.Join(names, "\n"))
+		fmt.Fprintln(cmd.OutOrStdout(), strings.Join(names, "\n"))
 		return nil
+	}
+
+	if err := store.Validate(); err != nil {
+		logrus.Warnf("The directory %q does not look like a valid Lima directory: %v", store.Directory(), err)
 	}
 
 	allinstances, err := store.Instances()
@@ -124,6 +141,7 @@ func listAction(cmd *cobra.Command, args []string) error {
 	}
 
 	instanceNames := []string{}
+	unmatchedInstances := false
 	if len(args) > 0 {
 		for _, arg := range args {
 			matches := instanceMatches(arg, allinstances)
@@ -131,6 +149,7 @@ func listAction(cmd *cobra.Command, args []string) error {
 				instanceNames = append(instanceNames, matches...)
 			} else {
 				logrus.Warnf("No instance matching %v found.", arg)
+				unmatchedInstances = true
 			}
 		}
 	} else {
@@ -140,6 +159,9 @@ func listAction(cmd *cobra.Command, args []string) error {
 	if quiet {
 		for _, instName := range instanceNames {
 			fmt.Fprintln(cmd.OutOrStdout(), instName)
+		}
+		if unmatchedInstances {
+			return unmatchedInstancesError{}
 		}
 		return nil
 	}
@@ -174,7 +196,12 @@ func listAction(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-	return store.PrintInstances(out, instances, format, &options)
+
+	err = store.PrintInstances(out, instances, format, &options)
+	if err == nil && unmatchedInstances {
+		return unmatchedInstancesError{}
+	}
+	return err
 }
 
 func listBashComplete(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {

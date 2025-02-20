@@ -3,6 +3,7 @@ package guestagent
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"sync"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/lima-vm/lima/pkg/guestagent/timesync"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/cpu"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func New(newTicker func() (<-chan time.Time, func()), iptablesIdle time.Duration) (Agent, error) {
@@ -26,27 +28,30 @@ func New(newTicker func() (<-chan time.Time, func()), iptablesIdle time.Duration
 	}
 
 	auditClient, err := libaudit.NewMulticastAuditClient(nil)
-	switch {
-	// syscall.EPROTONOSUPPORT or syscall.EAFNOSUPPORT is returned when calling attempting to connect to NETLINK_AUDIT
-	// on a kernel built without auditing support.
-	// https://github.com/elastic/go-libaudit/blob/ec298e53a6841a1f7715abbc7122635622f349bd/audit.go#L112-L115
-	case errors.Is(err, syscall.EPROTONOSUPPORT), errors.Is(err, syscall.EAFNOSUPPORT):
-		return startGuestAgentRoutines(a, false)
-	case !errors.Is(err, nil):
-		return nil, err
+	if err != nil {
+		// syscall.EPROTONOSUPPORT or syscall.EAFNOSUPPORT is returned when calling attempting to connect to NETLINK_AUDIT
+		// on a kernel built without auditing support.
+		// https://github.com/elastic/go-libaudit/blob/ec298e53a6841a1f7715abbc7122635622f349bd/audit.go#L112-L115
+		if !errors.Is(err, syscall.EPROTONOSUPPORT) && !errors.Is(err, syscall.EAFNOSUPPORT) {
+			return nil, err
+		}
+		logrus.Infof("Auditing is not available: %s", err)
+		return startGuestAgentRoutines(a, false), nil
 	}
 
-	// syscall.EPERM is returned when using audit from a non-initial namespace
-	// https://github.com/torvalds/linux/blob/633b47cb009d09dc8f4ba9cdb3a0ca138809c7c7/kernel/audit.c#L1054-L1057
 	auditStatus, err := auditClient.GetStatus()
-	switch {
-	case errors.Is(err, syscall.EPERM):
-		return startGuestAgentRoutines(a, false)
-	case !errors.Is(err, nil):
-		return nil, err
+	if err != nil {
+		// syscall.EPERM is returned when using audit from a non-initial namespace
+		// https://github.com/torvalds/linux/blob/633b47cb009d09dc8f4ba9cdb3a0ca138809c7c7/kernel/audit.c#L1054-L1057
+		if !errors.Is(err, syscall.EPERM) {
+			return nil, err
+		}
+		logrus.Infof("Auditing is not permitted: %s", err)
+		return startGuestAgentRoutines(a, false), nil
 	}
 
 	if auditStatus.Enabled == 0 {
+		logrus.Info("Enabling auditing")
 		if err = auditClient.SetEnabled(true, libaudit.WaitForReply); err != nil {
 			return nil, err
 		}
@@ -64,7 +69,8 @@ func New(newTicker func() (<-chan time.Time, func()), iptablesIdle time.Duration
 	} else {
 		a.worthCheckingIPTables = true
 	}
-	return startGuestAgentRoutines(a, true)
+	logrus.Infof("Auditing enabled (%d)", auditStatus.Enabled)
+	return startGuestAgentRoutines(a, true), nil
 }
 
 // startGuestAgentRoutines sets worthCheckingIPTables to true if auditing is not supported,
@@ -72,14 +78,14 @@ func New(newTicker func() (<-chan time.Time, func()), iptablesIdle time.Duration
 //
 // Auditing is not supported in a kernels and is not currently supported outside of the initial namespace, so does not work
 // from inside a container or WSL2 instance, for example.
-func startGuestAgentRoutines(a *agent, supportsAuditing bool) (*agent, error) {
+func startGuestAgentRoutines(a *agent, supportsAuditing bool) *agent {
 	if !supportsAuditing {
 		a.worthCheckingIPTables = true
 	}
 	go a.kubernetesServiceWatcher.Start()
 	go a.fixSystemTimeSkew()
 
-	return a, nil
+	return a
 }
 
 type agent struct {
@@ -101,6 +107,7 @@ type agent struct {
 // setWorthCheckingIPTablesRoutine sets worthCheckingIPTables to be false
 // when no NETFILTER_CFG audit message was received for the iptablesIdle time.
 func (a *agent) setWorthCheckingIPTablesRoutine(auditClient *libaudit.AuditClient, iptablesIdle time.Duration) {
+	logrus.Info("setWorthCheckingIPTablesRoutine(): monitoring netfilter audit events")
 	var latestTrue time.Time
 	go func() {
 		for {
@@ -121,8 +128,7 @@ func (a *agent) setWorthCheckingIPTablesRoutine(auditClient *libaudit.AuditClien
 			logrus.Error(err)
 			continue
 		}
-		switch msg.Type {
-		case auparse.AUDIT_NETFILTER_CFG:
+		if msg.Type == auparse.AUDIT_NETFILTER_CFG {
 			a.worthCheckingIPTablesMu.Lock()
 			logrus.Debug("setWorthCheckingIPTablesRoutine(): setting to true")
 			a.worthCheckingIPTables = true
@@ -133,11 +139,11 @@ func (a *agent) setWorthCheckingIPTablesRoutine(auditClient *libaudit.AuditClien
 }
 
 type eventState struct {
-	ports []api.IPPort
+	ports []*api.IPPort
 }
 
-func comparePorts(old, neww []api.IPPort) (added, removed []api.IPPort) {
-	mRaw := make(map[string]api.IPPort, len(old))
+func comparePorts(old, neww []*api.IPPort) (added, removed []*api.IPPort) {
+	mRaw := make(map[string]*api.IPPort, len(old))
 	mStillExist := make(map[string]bool, len(old))
 
 	for _, f := range old {
@@ -163,38 +169,37 @@ func comparePorts(old, neww []api.IPPort) (added, removed []api.IPPort) {
 	return
 }
 
-func (a *agent) collectEvent(ctx context.Context, st eventState) (api.Event, eventState) {
+func (a *agent) collectEvent(ctx context.Context, st eventState) (*api.Event, eventState) {
 	var (
-		ev  api.Event
+		ev  = &api.Event{}
 		err error
 	)
 	newSt := st
 	newSt.ports, err = a.LocalPorts(ctx)
 	if err != nil {
 		ev.Errors = append(ev.Errors, err.Error())
-		ev.Time = time.Now()
+		ev.Time = timestamppb.Now()
 		return ev, newSt
 	}
 	ev.LocalPortsAdded, ev.LocalPortsRemoved = comparePorts(st.ports, newSt.ports)
-	ev.Time = time.Now()
+	ev.Time = timestamppb.Now()
 	return ev, newSt
 }
 
-func isEventEmpty(ev api.Event) bool {
-	var empty api.Event
-	// ignore ev.Time
+func isEventEmpty(ev *api.Event) bool {
+	empty := &api.Event{}
 	copied := ev
-	copied.Time = time.Time{}
+	copied.Time = nil
 	return reflect.DeepEqual(empty, copied)
 }
 
-func (a *agent) Events(ctx context.Context, ch chan api.Event) {
+func (a *agent) Events(ctx context.Context, ch chan *api.Event) {
 	defer close(ch)
 	tickerCh, tickerClose := a.newTicker()
 	defer tickerClose()
 	var st eventState
 	for {
-		var ev api.Event
+		var ev *api.Event
 		ev, st = a.collectEvent(ctx, st)
 		if !isEventEmpty(ev) {
 			ch <- ev
@@ -211,11 +216,11 @@ func (a *agent) Events(ctx context.Context, ch chan api.Event) {
 	}
 }
 
-func (a *agent) LocalPorts(_ context.Context) ([]api.IPPort, error) {
+func (a *agent) LocalPorts(_ context.Context) ([]*api.IPPort, error) {
 	if cpu.IsBigEndian {
 		return nil, errors.New("big endian architecture is unsupported, because I don't know how /proc/net/tcp looks like on big endian hosts")
 	}
-	var res []api.IPPort
+	var res []*api.IPPort
 	tcpParsed, err := procnettcp.ParseFiles()
 	if err != nil {
 		return res, err
@@ -224,15 +229,25 @@ func (a *agent) LocalPorts(_ context.Context) ([]api.IPPort, error) {
 	for _, f := range tcpParsed {
 		switch f.Kind {
 		case procnettcp.TCP, procnettcp.TCP6:
+			if f.State == procnettcp.TCPListen {
+				res = append(res,
+					&api.IPPort{
+						Ip:       f.IP.String(),
+						Port:     int32(f.Port),
+						Protocol: "tcp",
+					})
+			}
+		case procnettcp.UDP, procnettcp.UDP6:
+			if f.State == procnettcp.UDPEstablished {
+				res = append(res,
+					&api.IPPort{
+						Ip:       f.IP.String(),
+						Port:     int32(f.Port),
+						Protocol: "udp",
+					})
+			}
 		default:
 			continue
-		}
-		if f.State == procnettcp.TCPListen {
-			res = append(res,
-				api.IPPort{
-					IP:   f.IP,
-					Port: int(f.Port),
-				})
 		}
 	}
 
@@ -260,16 +275,19 @@ func (a *agent) LocalPorts(_ context.Context) ([]api.IPPort, error) {
 		// Make sure the port isn't already listed from procnettcp
 		found := false
 		for _, re := range res {
-			if re.Port == ipt.Port {
+			if re.Port == int32(ipt.Port) {
 				found = true
 			}
 		}
 		if !found {
-			res = append(res,
-				api.IPPort{
-					IP:   ipt.IP,
-					Port: ipt.Port,
-				})
+			if ipt.TCP {
+				res = append(res,
+					&api.IPPort{
+						Ip:       ipt.IP.String(),
+						Port:     int32(ipt.Port), // The port value is already ensured to be within int32 bounds in iptables.go
+						Protocol: "tcp",
+					})
+			}
 		}
 	}
 
@@ -277,16 +295,17 @@ func (a *agent) LocalPorts(_ context.Context) ([]api.IPPort, error) {
 	for _, entry := range kubernetesEntries {
 		found := false
 		for _, re := range res {
-			if re.Port == int(entry.Port) {
+			if re.Port == int32(entry.Port) {
 				found = true
 			}
 		}
 
 		if !found {
 			res = append(res,
-				api.IPPort{
-					IP:   entry.IP,
-					Port: int(entry.Port),
+				&api.IPPort{
+					Ip:       entry.IP.String(),
+					Port:     int32(entry.Port),
+					Protocol: string(entry.Protocol),
 				})
 		}
 	}
@@ -309,7 +328,13 @@ func (a *agent) Info(ctx context.Context) (*api.Info, error) {
 const deltaLimit = 2 * time.Second
 
 func (a *agent) fixSystemTimeSkew() {
+	logrus.Info("fixSystemTimeSkew(): monitoring system time skew")
 	for {
+		ok, err := timesync.HasRTC()
+		if !ok {
+			logrus.Warnf("fixSystemTimeSkew: error: %s", err.Error())
+			break
+		}
 		ticker := time.NewTicker(10 * time.Second)
 		for now := range ticker.C {
 			rtc, err := timesync.GetRTCTime()
@@ -331,5 +356,16 @@ func (a *agent) fixSystemTimeSkew() {
 			}
 		}
 		ticker.Stop()
+	}
+}
+
+func (a *agent) HandleInotify(event *api.Inotify) {
+	location := event.MountPath
+	if _, err := os.Stat(location); err == nil {
+		local := event.Time.AsTime().Local()
+		err := os.Chtimes(location, local, local)
+		if err != nil {
+			logrus.Errorf("error in inotify handle. Event: %s, Error: %s", event, err)
+		}
 	}
 }

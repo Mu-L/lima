@@ -7,7 +7,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/AlecAivazis/survey/v2"
+	"github.com/lima-vm/lima/pkg/uiutil"
+
 	"github.com/mattn/go-isatty"
 	"github.com/sirupsen/logrus"
 )
@@ -49,8 +50,9 @@ func Sign(qExe string) error {
     <true/>
   </dict>
 </plist>`
-	if _, err = ent.Write([]byte(entXML)); err != nil {
-		return fmt.Errorf("Failed to write to a temporary file %q for signing QEMU binary: %w", entName, err)
+	if _, err = ent.WriteString(entXML); err != nil {
+		ent.Close()
+		return fmt.Errorf("failed to write to a temporary file %q for signing QEMU binary: %w", entName, err)
 	}
 	ent.Close()
 	signCmd := exec.Command("codesign", "--sign", "-", "--entitlements", entName, "--force", qExe)
@@ -68,14 +70,14 @@ func Sign(qExe string) error {
 // The result can be used *ONLY* for controlling hint messages.
 // DO NOT change the behavior of Lima depending on this result.
 //
-//nolint:revive
+//nolint:revive // underscores in this function name intentionally added
 func isColimaWrapper__useThisFunctionOnlyForPrintingHints__(qExe string) bool {
 	return strings.Contains(qExe, "/.colima/_wrapper/")
 }
 
 // AskToSignIfNotSignedProperly asks to sign the QEMU binary with the "com.apple.security.hypervisor" entitlement.
 //
-// On Homebrew, QEMU binaries are usually already signed, but Homebrew's signing infrastructure is broken for Intel as of Augest 2023.
+// On Homebrew, QEMU binaries are usually already signed, but Homebrew's signing infrastructure is broken for Intel as of August 2023.
 // https://github.com/lima-vm/lima/issues/1742
 func AskToSignIfNotSignedProperly(qExe string) {
 	if isSignedErr := IsSigned(qExe); isSignedErr != nil {
@@ -85,11 +87,10 @@ func AskToSignIfNotSignedProperly(qExe string) {
 		}
 		var ans bool
 		if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
-			prompt := &survey.Confirm{
-				Message: fmt.Sprintf("Try to sign %q with the \"com.apple.security.hypervisor\" entitlement?", qExe),
-				Default: true,
-			}
-			if askErr := survey.AskOne(prompt, &ans); askErr != nil {
+			message := fmt.Sprintf("Try to sign %q with the \"com.apple.security.hypervisor\" entitlement?", qExe)
+			var askErr error
+			ans, askErr = uiutil.Confirm(message, true)
+			if askErr != nil {
 				logrus.WithError(askErr).Warn("No answer was given")
 			}
 		}

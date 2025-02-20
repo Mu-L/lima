@@ -2,6 +2,7 @@ package qemu
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,15 +41,16 @@ type Config struct {
 	InstanceDir  string
 	LimaYAML     *limayaml.LimaYAML
 	SSHLocalPort int
+	SSHAddress   string
 }
 
-// MinimumQemuVersion is the minimum supported QEMU version
+// MinimumQemuVersion is the minimum supported QEMU version.
 const (
 	MinimumQemuVersion = "4.0.0"
 )
 
-// EnsureDisk also ensures the kernel and the initrd
-func EnsureDisk(cfg Config) error {
+// EnsureDisk also ensures the kernel and the initrd.
+func EnsureDisk(ctx context.Context, cfg Config) error {
 	diffDisk := filepath.Join(cfg.InstanceDir, filenames.DiffDisk)
 	if _, err := os.Stat(diffDisk); err == nil || !errors.Is(err, os.ErrNotExist) {
 		// disk is already ensured
@@ -63,12 +65,12 @@ func EnsureDisk(cfg Config) error {
 		var ensuredBaseDisk bool
 		errs := make([]error, len(cfg.LimaYAML.Images))
 		for i, f := range cfg.LimaYAML.Images {
-			if _, err := fileutils.DownloadFile(baseDisk, f.File, true, "the image", *cfg.LimaYAML.Arch); err != nil {
+			if _, err := fileutils.DownloadFile(ctx, baseDisk, f.File, true, "the image", *cfg.LimaYAML.Arch); err != nil {
 				errs[i] = err
 				continue
 			}
 			if f.Kernel != nil {
-				if _, err := fileutils.DownloadFile(kernel, f.Kernel.File, false, "the kernel", *cfg.LimaYAML.Arch); err != nil {
+				if _, err := fileutils.DownloadFile(ctx, kernel, f.Kernel.File, false, "the kernel", *cfg.LimaYAML.Arch); err != nil {
 					errs[i] = err
 					continue
 				}
@@ -80,7 +82,7 @@ func EnsureDisk(cfg Config) error {
 				}
 			}
 			if f.Initrd != nil {
-				if _, err := fileutils.DownloadFile(initrd, *f.Initrd, false, "the initrd", *cfg.LimaYAML.Arch); err != nil {
+				if _, err := fileutils.DownloadFile(ctx, initrd, *f.Initrd, false, "the initrd", *cfg.LimaYAML.Arch); err != nil {
 					errs[i] = err
 					continue
 				}
@@ -157,7 +159,7 @@ func newQmpClient(cfg Config) (*qmp.SocketMonitor, error) {
 	return qmpClient, nil
 }
 
-func sendHmpCommand(cfg Config, cmd string, tag string) (string, error) {
+func sendHmpCommand(cfg Config, cmd, tag string) (string, error) {
 	qmpClient, err := newQmpClient(cfg)
 	if err != nil {
 		return "", err
@@ -226,7 +228,7 @@ func Load(cfg Config, run bool, tag string) error {
 	return err
 }
 
-// List returns a space-separated list of all snapshots, with header and newlines
+// List returns a space-separated list of all snapshots, with header and newlines.
 func List(cfg Config, run bool) (string, error) {
 	if run {
 		out, err := sendHmpCommand(cfg, "info", "snapshots")
@@ -313,7 +315,7 @@ type features struct {
 	VersionGEQ7 bool
 }
 
-func inspectFeatures(exe string, machine string) (*features, error) {
+func inspectFeatures(exe, machine string) (*features, error) {
 	var (
 		f      features
 		stdout bytes.Buffer
@@ -454,7 +456,7 @@ func adjustMemBytesDarwinARM64HVF(memBytes int64, accel string, features *featur
 	return memBytes
 }
 
-// qemuMachine returns string to use for -machine
+// qemuMachine returns string to use for -machine.
 func qemuMachine(arch limayaml.Arch) string {
 	if arch == limayaml.X8664 {
 		return "q35"
@@ -462,9 +464,22 @@ func qemuMachine(arch limayaml.Arch) string {
 	return "virt"
 }
 
-func Cmdline(cfg Config) (string, []string, error) {
+// audioDevice returns the default audio device.
+func audioDevice() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "coreaudio"
+	case "linux":
+		return "pa" // pulseaudio
+	case "windows":
+		return "dsound"
+	}
+	return "oss"
+}
+
+func Cmdline(ctx context.Context, cfg Config) (exe string, args []string, err error) {
 	y := cfg.LimaYAML
-	exe, args, err := Exe(*y.Arch)
+	exe, args, err = Exe(*y.Arch)
 	if err != nil {
 		return "", nil, err
 	}
@@ -481,6 +496,13 @@ func Cmdline(cfg Config) (string, []string, error) {
 		logrus.Debugf("QEMU version %s detected", version.String())
 		if version.LessThan(*semver.New(MinimumQemuVersion)) {
 			logrus.Fatalf("QEMU %v is too old, %v or later required", version, MinimumQemuVersion)
+		}
+		if y.VMOpts.QEMU.MinimumVersion != nil && version.LessThan(*semver.New(*y.VMOpts.QEMU.MinimumVersion)) {
+			logrus.Fatalf("QEMU %v is too old, template requires %q or later", version, *y.VMOpts.QEMU.MinimumVersion)
+		}
+		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && version.Equal(*semver.New("8.2.0")) {
+			logrus.Fatal("QEMU 8.2.0 is no longer supported on ARM Mac due to <https://gitlab.com/qemu-project/qemu/-/issues/1990>. " +
+				"Please upgrade QEMU to v8.2.1 (or downgrade to v8.1.x).")
 		}
 	}
 
@@ -552,7 +574,12 @@ func Cmdline(cfg Config) (string, []string, error) {
 		}
 		args = appendArgsIfNoConflict(args, "-machine", machine)
 	case limayaml.RISCV64:
-		machine := "virt,accel=" + accel
+		// https://github.com/tianocore/edk2/blob/edk2-stable202408/OvmfPkg/RiscVVirt/README.md#test
+		// > Note: the `acpi=off` machine property is specified because Linux guest
+		// > support for ACPI (that is, the ACPI consumer side) is a work in progress.
+		// > Currently, `acpi=off` is recommended unless you are developing ACPI support
+		// > yourself.
+		machine := "virt,acpi=off,accel=" + accel
 		args = appendArgsIfNoConflict(args, "-machine", machine)
 	case limayaml.ARMV7L:
 		machine := "virt,accel=" + accel
@@ -569,40 +596,72 @@ func Cmdline(cfg Config) (string, []string, error) {
 		logrus.Warnf("field `firmware.legacyBIOS` is not supported for architecture %q, ignoring", *y.Arch)
 		legacyBIOS = false
 	}
-	if !legacyBIOS && *y.Arch != limayaml.RISCV64 {
-		firmware, err := getFirmware(exe, *y.Arch)
-		if err != nil {
-			return "", nil, err
+	if !legacyBIOS {
+		var firmware string
+		downloadedFirmware := filepath.Join(cfg.InstanceDir, filenames.QemuEfiCodeFD)
+		if _, stErr := os.Stat(downloadedFirmware); errors.Is(stErr, os.ErrNotExist) {
+		loop:
+			for _, f := range y.Firmware.Images {
+				switch f.VMType {
+				case "", limayaml.QEMU:
+					if f.Arch == *y.Arch {
+						if _, err = fileutils.DownloadFile(ctx, downloadedFirmware, f.File, true, "UEFI code "+f.Location, *y.Arch); err != nil {
+							logrus.WithError(err).Warnf("failed to download %q", f.Location)
+							continue loop
+						}
+						firmware = downloadedFirmware
+						logrus.Infof("Using firmware %q (downloaded from %q)", firmware, f.Location)
+						break loop
+					}
+				}
+			}
+		} else {
+			firmware = downloadedFirmware
+			logrus.Infof("Using existing firmware (%q)", firmware)
 		}
-		args = append(args, "-drive", fmt.Sprintf("if=pflash,format=raw,readonly=on,file=%s", firmware))
+		if firmware == "" {
+			firmware, err = getFirmware(exe, *y.Arch)
+			if err != nil {
+				return "", nil, err
+			}
+			logrus.Infof("Using system firmware (%q)", firmware)
+		}
+		if firmware != "" {
+			args = append(args, "-drive", fmt.Sprintf("if=pflash,format=raw,readonly=on,file=%s", firmware))
+		}
 	}
 
 	// Disk
 	baseDisk := filepath.Join(cfg.InstanceDir, filenames.BaseDisk)
 	diffDisk := filepath.Join(cfg.InstanceDir, filenames.DiffDisk)
 	extraDisks := []string{}
-	if len(y.AdditionalDisks) > 0 {
-		for _, d := range y.AdditionalDisks {
-			diskName := d.Name
-			disk, err := store.InspectDisk(diskName)
-			if err != nil {
-				logrus.Errorf("could not load disk %q: %q", diskName, err)
-				return "", nil, err
-			}
+	for _, d := range y.AdditionalDisks {
+		diskName := d.Name
+		disk, err := store.InspectDisk(diskName)
+		if err != nil {
+			logrus.Errorf("could not load disk %q: %q", diskName, err)
+			return "", nil, err
+		}
 
-			if disk.Instance != "" {
+		if disk.Instance != "" {
+			if disk.InstanceDir != cfg.InstanceDir {
 				logrus.Errorf("could not attach disk %q, in use by instance %q", diskName, disk.Instance)
 				return "", nil, err
 			}
-			logrus.Infof("Mounting disk %q on %q", diskName, disk.MountPoint)
-			err = disk.Lock(cfg.InstanceDir)
+			err = disk.Unlock()
 			if err != nil {
-				logrus.Errorf("could not lock disk %q: %q", diskName, err)
+				logrus.Errorf("could not unlock disk %q to reuse in the same instance %q", diskName, cfg.Name)
 				return "", nil, err
 			}
-			dataDisk := filepath.Join(disk.Dir, filenames.DataDisk)
-			extraDisks = append(extraDisks, dataDisk)
 		}
+		logrus.Infof("Mounting disk %q on %q", diskName, disk.MountPoint)
+		err = disk.Lock(cfg.InstanceDir)
+		if err != nil {
+			logrus.Errorf("could not lock disk %q: %q", diskName, err)
+			return "", nil, err
+		}
+		dataDisk := filepath.Join(disk.Dir, filenames.DataDisk)
+		extraDisks = append(extraDisks, dataDisk)
 	}
 
 	isBaseDiskCDROM, err := iso9660util.IsISO9660(baseDisk)
@@ -658,8 +717,8 @@ func Cmdline(cfg Config) (string, []string, error) {
 	// Configure default usernetwork with limayaml.MACAddress(driver.Instance.Dir) for eth0 interface
 	firstUsernetIndex := limayaml.FirstUsernetIndex(y)
 	if firstUsernetIndex == -1 {
-		args = append(args, "-netdev", fmt.Sprintf("user,id=net0,net=%s,dhcpstart=%s,hostfwd=tcp:127.0.0.1:%d-:22",
-			networks.SlirpNetwork, networks.SlirpIPAddress, cfg.SSHLocalPort))
+		args = append(args, "-netdev", fmt.Sprintf("user,id=net0,net=%s,dhcpstart=%s,hostfwd=tcp:%s:%d-:22",
+			networks.SlirpNetwork, networks.SlirpIPAddress, cfg.SSHAddress, cfg.SSHLocalPort))
 	} else {
 		qemuSock, err := usernet.Sock(y.Networks[firstUsernetIndex].Lima, usernet.QEMUSock)
 		if err != nil {
@@ -670,9 +729,8 @@ func Cmdline(cfg Config) (string, []string, error) {
 	args = append(args, "-device", "virtio-net-pci,netdev=net0,mac="+limayaml.MACAddress(cfg.InstanceDir))
 
 	for i, nw := range y.Networks {
-		var vdeSock string
 		if nw.Lima != "" {
-			nwCfg, err := networks.Config()
+			nwCfg, err := networks.LoadConfig()
 			if err != nil {
 				return "", nil, err
 			}
@@ -696,60 +754,19 @@ func Cmdline(cfg Config) (string, []string, error) {
 				if runtime.GOOS != "darwin" {
 					return "", nil, fmt.Errorf("networks.yaml '%s' configuration is only supported on macOS right now", nw.Lima)
 				}
-				socketVMNetOk, err := nwCfg.IsDaemonInstalled(networks.SocketVMNet)
+				logrus.Debugf("Using socketVMNet (%q)", nwCfg.Paths.SocketVMNet)
+				sock, err := networks.Sock(nw.Lima)
 				if err != nil {
 					return "", nil, err
 				}
-				if socketVMNetOk {
-					logrus.Debugf("Using socketVMNet (%q)", nwCfg.Paths.SocketVMNet)
-					if vdeVMNetOk, _ := nwCfg.IsDaemonInstalled(networks.VDEVMNet); vdeVMNetOk {
-						logrus.Debugf("Ignoring vdeVMNet (%q), as socketVMNet (%q) is available and has higher precedence", nwCfg.Paths.VDEVMNet, nwCfg.Paths.SocketVMNet)
-					}
-					sock, err := networks.Sock(nw.Lima)
-					if err != nil {
-						return "", nil, err
-					}
-					args = append(args, "-netdev", fmt.Sprintf("socket,id=net%d,fd={{ fd_connect %q }}", i+1, sock))
-				} else if nwCfg.Paths.VDEVMNet != "" {
-					logrus.Warn("vdeVMNet is deprecated, use socketVMNet instead (See docs/network.md)")
-					vdeSock, err = networks.VDESock(nw.Lima)
-					if err != nil {
-						return "", nil, err
-					}
-				}
+				args = append(args, "-netdev", fmt.Sprintf("socket,id=net%d,fd={{ fd_connect %q }}", i+1, sock))
 				// TODO: should we also validate that the socket exists, or do we rely on the
 				// networks reconciler to throw an error when the network cannot start?
 			}
 		} else if nw.Socket != "" {
 			args = append(args, "-netdev", fmt.Sprintf("socket,id=net%d,fd={{ fd_connect %q }}", i+1, nw.Socket))
-		} else if nw.VNLDeprecated != "" {
-			// VDE4 accepts VNL like vde:///var/run/vde.ctl as well as file path like /var/run/vde.ctl .
-			// VDE2 only accepts the latter form.
-			// VDE2 supports macOS but VDE4 does not yet, so we trim vde:// prefix here for VDE2 compatibility.
-			vdeSock = strings.TrimPrefix(nw.VNLDeprecated, "vde://")
-			if !strings.Contains(vdeSock, "://") {
-				if _, err := os.Stat(vdeSock); err != nil {
-					return "", nil, fmt.Errorf("cannot use VNL %q: %w", nw.VNLDeprecated, err)
-				}
-				// vdeSock is a directory, unless vde.SwitchPort == 65535 (PTP)
-				actualSocket := filepath.Join(vdeSock, "ctl")
-				if nw.SwitchPortDeprecated == 65535 { // PTP
-					actualSocket = vdeSock
-				}
-				if st, err := os.Stat(actualSocket); err != nil {
-					return "", nil, fmt.Errorf("cannot use VNL %q: failed to stat %q: %w", nw.VNLDeprecated, actualSocket, err)
-				} else if st.Mode()&fs.ModeSocket == 0 {
-					return "", nil, fmt.Errorf("cannot use VNL %q: %q is not a socket: %w", nw.VNLDeprecated, actualSocket, err)
-				}
-			}
 		} else {
 			return "", nil, fmt.Errorf("invalid network spec %+v", nw)
-		}
-		if vdeSock != "" {
-			if !strings.Contains(string(features.NetdevHelp), "vde") {
-				return "", nil, fmt.Errorf("netdev \"vde\" is not supported by %s ( Hint: recompile QEMU with `configure --enable-vde` )", exe)
-			}
-			args = append(args, "-netdev", fmt.Sprintf("vde,id=net%d,sock=%s", i+1, vdeSock))
 		}
 		args = append(args, "-device", fmt.Sprintf("virtio-net-pci,netdev=net%d,mac=%s", i+1, nw.MACAddress))
 	}
@@ -765,6 +782,9 @@ func Cmdline(cfg Config) (string, []string, error) {
 		id := "default"
 		// audio device
 		audiodev := *y.Audio.Device
+		if audiodev == "default" {
+			audiodev = audioDevice()
+		}
 		audiodev += fmt.Sprintf(",id=%s", id)
 		args = append(args, "-audiodev", audiodev)
 		// audio controller
@@ -940,52 +960,52 @@ func FindVirtiofsd(qemuExe string) (string, error) {
 		candidates = append(candidates, filepath.Join("/usr", relativePath))
 	}
 
-	for _, vhostConfigsDir := range candidates {
-		logrus.Debugf("Checking vhost directory %s", vhostConfigsDir)
+	for _, vhostCfgsDir := range candidates {
+		logrus.Debugf("Checking vhost directory %s", vhostCfgsDir)
 
-		configEntries, err := os.ReadDir(vhostConfigsDir)
+		cfgEntries, err := os.ReadDir(vhostCfgsDir)
 		if err != nil {
 			logrus.Debugf("Failed to list vhost directory: %v", err)
 			continue
 		}
 
-		for _, configEntry := range configEntries {
-			logrus.Debugf("Checking vhost config %s", configEntry.Name())
-			if !strings.HasSuffix(configEntry.Name(), ".json") {
+		for _, cfgEntry := range cfgEntries {
+			logrus.Debugf("Checking vhost vhostCfg %s", cfgEntry.Name())
+			if !strings.HasSuffix(cfgEntry.Name(), ".json") {
 				continue
 			}
 
-			var config vhostUserBackend
-			contents, err := os.ReadFile(filepath.Join(vhostConfigsDir, configEntry.Name()))
+			var vhostCfg vhostUserBackend
+			contents, err := os.ReadFile(filepath.Join(vhostCfgsDir, cfgEntry.Name()))
 			if err == nil {
-				err = json.Unmarshal(contents, &config)
+				err = json.Unmarshal(contents, &vhostCfg)
 			}
 
 			if err != nil {
-				logrus.Warnf("Failed to load vhost-user config %s: %v", configEntry.Name(), err)
+				logrus.Warnf("Failed to load vhost-user config %s: %v", cfgEntry.Name(), err)
 				continue
 			}
-			logrus.Debugf("%v", config)
+			logrus.Debugf("%v", vhostCfg)
 
-			if config.BackendType != "fs" {
+			if vhostCfg.BackendType != "fs" {
 				continue
 			}
 
 			// Only rust virtiofsd supports --version, so use that to make sure this isn't
 			// QEMU's virtiofsd, which requires running as root.
-			cmd := exec.Command(config.Binary, "--version")
+			cmd := exec.Command(vhostCfg.Binary, "--version")
 			output, err := cmd.CombinedOutput()
 			if err != nil {
 				logrus.Warnf("Failed to run %s --version (is this QEMU virtiofsd?): %s: %s",
-					config.Binary, err, output)
+					vhostCfg.Binary, err, output)
 				continue
 			}
 
-			return config.Binary, nil
+			return vhostCfg.Binary, nil
 		}
 	}
 
-	return "", errors.New("Failed to locate virtiofsd")
+	return "", errors.New("failed to locate virtiofsd")
 }
 
 func VirtiofsdCmdline(cfg Config, mountIndex int) ([]string, error) {
@@ -1007,7 +1027,7 @@ func VirtiofsdCmdline(cfg Config, mountIndex int) ([]string, error) {
 	}, nil
 }
 
-// qemuArch returns the arch string used by qemu
+// qemuArch returns the arch string used by qemu.
 func qemuArch(arch limayaml.Arch) string {
 	if arch == limayaml.ARMV7L {
 		return "arm"
@@ -1015,9 +1035,16 @@ func qemuArch(arch limayaml.Arch) string {
 	return arch
 }
 
-func Exe(arch limayaml.Arch) (string, []string, error) {
+// qemuEdk2 returns the arch string used by `/usr/local/share/qemu/edk2-*-code.fd`.
+func qemuEdk2Arch(arch limayaml.Arch) string {
+	if arch == limayaml.RISCV64 {
+		return "riscv"
+	}
+	return qemuArch(arch)
+}
+
+func Exe(arch limayaml.Arch) (exe string, args []string, err error) {
 	exeBase := "qemu-system-" + qemuArch(arch)
-	var args []string
 	envK := "QEMU_SYSTEM_" + strings.ToUpper(qemuArch(arch))
 	if envV := os.Getenv(envK); envV != "" {
 		ss, err := shellwords.Parse(envV)
@@ -1029,7 +1056,7 @@ func Exe(arch limayaml.Arch) (string, []string, error) {
 			logrus.Warnf("Specifying args (%v) via $%s is supported only for debugging!", args, envK)
 		}
 	}
-	exe, err := exec.LookPath(exeBase)
+	exe, err = exec.LookPath(exeBase)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1079,7 +1106,7 @@ func getQemuVersion(qemuExe string) (*semver.Version, error) {
 
 func getFirmware(qemuExe string, arch limayaml.Arch) (string, error) {
 	switch arch {
-	case limayaml.X8664, limayaml.AARCH64, limayaml.ARMV7L:
+	case limayaml.X8664, limayaml.AARCH64, limayaml.ARMV7L, limayaml.RISCV64:
 	default:
 		return "", fmt.Errorf("unexpected architecture: %q", arch)
 	}
@@ -1093,7 +1120,7 @@ func getFirmware(qemuExe string, arch limayaml.Arch) (string, error) {
 	localDir := filepath.Dir(binDir)                             // "/usr/local"
 	userLocalDir := filepath.Join(currentUser.HomeDir, ".local") // "$HOME/.local"
 
-	relativePath := fmt.Sprintf("share/qemu/edk2-%s-code.fd", qemuArch(arch))
+	relativePath := fmt.Sprintf("share/qemu/edk2-%s-code.fd", qemuEdk2Arch(arch))
 	candidates := []string{
 		filepath.Join(userLocalDir, relativePath), // XDG-like
 		filepath.Join(localDir, relativePath),     // macOS (homebrew)
@@ -1103,18 +1130,25 @@ func getFirmware(qemuExe string, arch limayaml.Arch) (string, error) {
 	case limayaml.X8664:
 		// Debian package "ovmf"
 		candidates = append(candidates, "/usr/share/OVMF/OVMF_CODE.fd")
+		candidates = append(candidates, "/usr/share/OVMF/OVMF_CODE_4M.fd")
+		// Fedora package "edk2-ovmf"
+		candidates = append(candidates, "/usr/share/edk2/ovmf/OVMF_CODE.fd")
 		// openSUSE package "qemu-ovmf-x86_64"
-		candidates = append(candidates, "/usr/share/qemu/ovmf-x86_64-code.bin")
+		candidates = append(candidates, "/usr/share/qemu/ovmf-x86_64.bin")
 		// Archlinux package "edk2-ovmf"
 		candidates = append(candidates, "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd")
 	case limayaml.AARCH64:
 		// Debian package "qemu-efi-aarch64"
+		// Fedora package "edk2-aarch64"
 		candidates = append(candidates, "/usr/share/AAVMF/AAVMF_CODE.fd")
 		// Debian package "qemu-efi-aarch64" (unpadded, backwards compatibility)
 		candidates = append(candidates, "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd")
 	case limayaml.ARMV7L:
 		// Debian package "qemu-efi-arm"
+		// Fedora package "edk2-arm"
 		candidates = append(candidates, "/usr/share/AAVMF/AAVMF32_CODE.fd")
+	case limayaml.RISCV64:
+		// NOP, as EDK2 for RISCV64 is not packaged yet in well-known distros.
 	}
 
 	logrus.Debugf("firmware candidates = %v", candidates)
@@ -1126,7 +1160,8 @@ func getFirmware(qemuExe string, arch limayaml.Arch) (string, error) {
 	}
 
 	if arch == limayaml.X8664 {
-		return "", fmt.Errorf("could not find firmware for %q (hint: try setting `firmware.legacyBIOS` to `true`)", qemuExe)
+		return "", fmt.Errorf("could not find firmware for %q (hint: try setting `firmware.legacyBIOS` to `true`)", arch)
 	}
-	return "", fmt.Errorf("could not find firmware for %q (hint: try copying the \"edk-%s-code.fd\" firmware to $HOME/.local/share/qemu/)", arch, qemuExe)
+	qemuArch := strings.TrimPrefix(filepath.Base(qemuExe), "qemu-system-")
+	return "", fmt.Errorf("could not find firmware for %q (hint: try copying the \"edk-%s-code.fd\" firmware to $HOME/.local/share/qemu/)", arch, qemuArch)
 }

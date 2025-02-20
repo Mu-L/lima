@@ -2,8 +2,6 @@
 package nativeimgutil
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +10,9 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/docker/go-units"
 	"github.com/lima-vm/go-qcow2reader"
+	"github.com/lima-vm/go-qcow2reader/convert"
 	"github.com/lima-vm/go-qcow2reader/image/qcow2"
 	"github.com/lima-vm/go-qcow2reader/image/raw"
-	"github.com/lima-vm/lima/pkg/osutil"
 	"github.com/lima-vm/lima/pkg/progressbar"
 	"github.com/sirupsen/logrus"
 )
@@ -68,18 +66,23 @@ func ConvertToRaw(source, dest string, size *int64, allowSourceWithBackingFile b
 	defer os.RemoveAll(destTmp)
 	defer destTmpF.Close()
 
+	// Truncating before copy eliminates the seeks during copy and provide a
+	// hint to the file system that may minimize allocations and fragmentation
+	// of the file.
+	if err := MakeSparse(destTmpF, srcImg.Size()); err != nil {
+		return err
+	}
+
 	// Copy
-	srcImgR := io.NewSectionReader(srcImg, 0, srcImg.Size())
 	bar, err := progressbar.New(srcImg.Size())
 	if err != nil {
 		return err
 	}
-	const bufSize = 1024 * 1024
 	bar.Start()
-	copied, err := copySparse(destTmpF, bar.NewProxyReader(srcImgR), bufSize)
+	err = convert.Convert(destTmpF, srcImg, convert.Options{Progress: bar})
 	bar.Finish()
 	if err != nil {
-		return fmt.Errorf("failed to call copySparse(), bufSize=%d, copied=%d: %w", bufSize, copied, err)
+		return fmt.Errorf("failed to convert image: %w", err)
 	}
 
 	// Resize
@@ -122,45 +125,9 @@ func convertRawToRaw(source, dest string, size *int64) error {
 	return nil
 }
 
-func copySparse(w *os.File, r io.Reader, bufSize int64) (int64, error) {
-	var n int64
-	zeroBuf := make([]byte, bufSize)
-	buf := make([]byte, bufSize)
-	var eof bool
-	for !eof {
-		rN, rErr := r.Read(buf)
-		if rErr != nil {
-			eof = errors.Is(rErr, io.EOF)
-			if !eof {
-				return n, fmt.Errorf("failed to read: %w", rErr)
-			}
-		}
-		// TODO: qcow2reader should have a method to notify whether buf is zero
-		if bytes.Equal(buf, zeroBuf) {
-			if _, sErr := w.Seek(int64(rN), io.SeekCurrent); sErr != nil {
-				return n, fmt.Errorf("failed seek: %w", sErr)
-			}
-			// no need to ftruncate here
-			n += int64(rN)
-		} else {
-			wN, wErr := w.Write(buf)
-			if wN > 0 {
-				n += int64(wN)
-			}
-			if wErr != nil {
-				return n, fmt.Errorf("failed to read: %w", wErr)
-			}
-			if wN != rN {
-				return n, fmt.Errorf("read %d, but wrote %d bytes", rN, wN)
-			}
-		}
-	}
-	return n, nil
-}
-
 func MakeSparse(f *os.File, n int64) error {
 	if _, err := f.Seek(n, io.SeekStart); err != nil {
 		return err
 	}
-	return osutil.Ftruncate(int(f.Fd()), n)
+	return f.Truncate(n)
 }

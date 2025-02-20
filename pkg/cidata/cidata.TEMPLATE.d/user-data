@@ -5,27 +5,44 @@ growpart:
   mode: auto
   devices: ['/']
 
-{{- if or (eq .MountType "9p") (eq .MountType "virtiofs") }}
-{{- if .Mounts }}
+{{- if .UpgradePackages }}
+package_update: true
+package_upgrade: true
+package_reboot_if_required: true
+{{- end }}
+
+{{- if or .RosettaEnabled (or (eq .MountType "9p") (eq .MountType "virtiofs")) }}
 mounts:
-  {{- range $m := $.Mounts}}
+  {{- if .RosettaEnabled }}{{/* Mount the rosetta volume before systemd-binfmt.service(8) starts */}}
+- [vz-rosetta, /mnt/lima-rosetta, virtiofs, defaults, "0", "0"]
+  {{- end }}
+  {{- if .Mounts }}
+    {{- range $m := $.Mounts}}
 - [{{$m.Tag}}, {{$m.MountPoint}}, {{$m.Type}}, "{{$m.Options}}", "0", "0"]
+    {{- end }}
   {{- end }}
 {{- end }}
+
+{{- if .TimeZone }}
+timezone: {{.TimeZone}}
 {{- end }}
 
 users:
   - name: "{{.User}}"
     uid: "{{.UID}}"
+{{- if .Comment }}
+    gecos: {{ printf "%q" .Comment }}
+{{- end }}
     homedir: "{{.Home}}"
-    shell: /bin/bash
+    shell: {{.Shell}}
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: true
     ssh-authorized-keys:
-    {{- range $val := .SSHPubKeys}}
-      - "{{$val}}"
-    {{- end}}
+    {{- range $val := .SSHPubKeys }}
+      - {{ printf "%q" $val }}
+    {{- end }}
 
+{{- if .BootScripts }}
 write_files:
  - content: |
       #!/bin/sh
@@ -39,6 +56,7 @@ write_files:
    owner: root:root
    path: /var/lib/cloud/scripts/per-boot/00-lima.boot.sh
    permissions: '0755'
+{{- end }}
 
 {{- if .DNSAddresses }}
 # This has no effect on systems using systemd-resolved, but is used
@@ -53,15 +71,21 @@ resolv_conf:
   {{- end }}
 {{- end }}
 
+{{- if or .CACerts.RemoveDefaults .CACerts.Trusted }}
 {{ with .CACerts }}
-ca-certs:
+ca_certs:
+  {{- if .RemoveDefaults }}
   remove_defaults: {{ .RemoveDefaults }}
+  {{- end }}
+  {{- if .Trusted}}
   trusted:
   {{- range $cert := .Trusted }}
   - |
     {{- range $line := $cert.Lines }}
     {{ $line }}
     {{- end }}
+    {{- end }}
+  {{- end }}
   {{- end }}
 {{- end }}
 
@@ -69,6 +93,12 @@ ca-certs:
 bootcmd:
   {{- range $cmd := $.BootCmds }}
 - |
+  # We need to embed the params.env as a here-doc because /mnt/lima-cidata is not yet mounted
+  while read -r line; do [ -n "$line" ] && export "$line"; done <<'EOF'
+    {{- range $key, $val := $.Param }}
+  PARAM_{{ $key }}={{ $val }}
+    {{- end }}
+  EOF
     {{- range $line := $cmd.Lines }}
   {{ $line }}
     {{- end }}

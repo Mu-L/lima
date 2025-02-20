@@ -24,7 +24,7 @@ func fileWarning(filename string) string {
 	s += "# -----------\n"
 	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
 		s += "#"
-		if len(line) > 0 {
+		if line != "" {
 			s += " " + line
 		}
 		s += "\n"
@@ -63,9 +63,11 @@ func OpenEditor(content []byte, hdr string) ([]byte, error) {
 	}
 	tmpYAMLPath := tmpYAMLFile.Name()
 	defer os.RemoveAll(tmpYAMLPath)
-	if err := os.WriteFile(tmpYAMLPath,
-		append([]byte(hdr), content...),
-		0o600); err != nil {
+	if _, err := tmpYAMLFile.Write(append([]byte(hdr), content...)); err != nil {
+		tmpYAMLFile.Close()
+		return nil, err
+	}
+	if err := tmpYAMLFile.Close(); err != nil {
 		return nil, err
 	}
 

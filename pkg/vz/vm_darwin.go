@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/Code-Hex/vz/v3"
+	"github.com/coreos/go-semver/semver"
 	"github.com/docker/go-units"
 	"github.com/lima-vm/go-qcow2reader"
 	"github.com/lima-vm/go-qcow2reader/image/raw"
@@ -25,6 +26,7 @@ import (
 	"github.com/lima-vm/lima/pkg/nativeimgutil"
 	"github.com/lima-vm/lima/pkg/networks"
 	"github.com/lima-vm/lima/pkg/networks/usernet"
+	"github.com/lima-vm/lima/pkg/osutil"
 	"github.com/lima-vm/lima/pkg/store"
 	"github.com/lima-vm/lima/pkg/store/filenames"
 	"github.com/sirupsen/logrus"
@@ -90,7 +92,7 @@ func startVM(ctx context.Context, driver *driver.BaseDriver) (*virtualMachineWra
 			case newState := <-machine.StateChangedNotify():
 				switch newState {
 				case vz.VirtualMachineStateRunning:
-					pidFile := filepath.Join(driver.Instance.Dir, filenames.PIDFile(*driver.Yaml.VMType))
+					pidFile := filepath.Join(driver.Instance.Dir, filenames.PIDFile(*driver.Instance.Config.VMType))
 					if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
 						logrus.Errorf("pidfile %q already exists", pidFile)
 						errCh <- err
@@ -102,7 +104,7 @@ func startVM(ctx context.Context, driver *driver.BaseDriver) (*virtualMachineWra
 					filesToRemove[pidFile] = struct{}{}
 					logrus.Info("[VZ] - vm state change: running")
 
-					err := usernetClient.ConfigureDriver(driver)
+					err := usernetClient.ConfigureDriver(ctx, driver)
 					if err != nil {
 						errCh <- err
 					}
@@ -124,37 +126,36 @@ func startVM(ctx context.Context, driver *driver.BaseDriver) (*virtualMachineWra
 }
 
 func startUsernet(ctx context.Context, driver *driver.BaseDriver) (*usernet.Client, error) {
-	firstUsernetIndex := limayaml.FirstUsernetIndex(driver.Yaml)
-	if firstUsernetIndex == -1 {
-		// Start a in-process gvisor-tap-vsock
-		endpointSock, err := usernet.SockWithDirectory(driver.Instance.Dir, "", usernet.EndpointSock)
-		if err != nil {
-			return nil, err
-		}
-		vzSock, err := usernet.SockWithDirectory(driver.Instance.Dir, "", usernet.FDSock)
-		if err != nil {
-			return nil, err
-		}
-		os.RemoveAll(endpointSock)
-		os.RemoveAll(vzSock)
-		err = usernet.StartGVisorNetstack(ctx, &usernet.GVisorNetstackOpts{
-			MTU:      1500,
-			Endpoint: endpointSock,
-			FdSocket: vzSock,
-			Async:    true,
-			DefaultLeases: map[string]string{
-				networks.SlirpIPAddress: limayaml.MACAddress(driver.Instance.Dir),
-			},
-			Subnet: networks.SlirpNetwork,
-		})
-		if err != nil {
-			return nil, err
-		}
-		subnetIP, _, err := net.ParseCIDR(networks.SlirpNetwork)
-		return usernet.NewClient(endpointSock, subnetIP), err
+	if firstUsernetIndex := limayaml.FirstUsernetIndex(driver.Instance.Config); firstUsernetIndex != -1 {
+		nwName := driver.Instance.Config.Networks[firstUsernetIndex].Lima
+		return usernet.NewClientByName(nwName), nil
 	}
-	nwName := driver.Yaml.Networks[firstUsernetIndex].Lima
-	return usernet.NewClientByName(nwName), nil
+	// Start a in-process gvisor-tap-vsock
+	endpointSock, err := usernet.SockWithDirectory(driver.Instance.Dir, "", usernet.EndpointSock)
+	if err != nil {
+		return nil, err
+	}
+	vzSock, err := usernet.SockWithDirectory(driver.Instance.Dir, "", usernet.FDSock)
+	if err != nil {
+		return nil, err
+	}
+	os.RemoveAll(endpointSock)
+	os.RemoveAll(vzSock)
+	err = usernet.StartGVisorNetstack(ctx, &usernet.GVisorNetstackOpts{
+		MTU:      1500,
+		Endpoint: endpointSock,
+		FdSocket: vzSock,
+		Async:    true,
+		DefaultLeases: map[string]string{
+			networks.SlirpIPAddress: limayaml.MACAddress(driver.Instance.Dir),
+		},
+		Subnet: networks.SlirpNetwork,
+	})
+	if err != nil {
+		return nil, err
+	}
+	subnetIP, _, err := net.ParseCIDR(networks.SlirpNetwork)
+	return usernet.NewClient(endpointSock, subnetIP), err
 }
 
 func createVM(driver *driver.BaseDriver) (*vz.VirtualMachine, error) {
@@ -204,24 +205,19 @@ func createVM(driver *driver.BaseDriver) (*vz.VirtualMachine, error) {
 }
 
 func createInitialConfig(driver *driver.BaseDriver) (*vz.VirtualMachineConfiguration, error) {
-	efiVariableStore, err := getEFI(driver)
+	bootLoader, err := bootLoader(driver)
 	if err != nil {
 		return nil, err
 	}
 
-	bootLoader, err := vz.NewEFIBootLoader(vz.WithEFIVariableStore(efiVariableStore))
-	if err != nil {
-		return nil, err
-	}
-
-	bytes, err := units.RAMInBytes(*driver.Yaml.Memory)
+	bytes, err := units.RAMInBytes(*driver.Instance.Config.Memory)
 	if err != nil {
 		return nil, err
 	}
 
 	vmConfig, err := vz.NewVirtualMachineConfiguration(
 		bootLoader,
-		uint(*driver.Yaml.CPUs),
+		uint(*driver.Instance.Config.CPUs),
 		uint64(bytes),
 	)
 	if err != nil {
@@ -240,6 +236,27 @@ func attachPlatformConfig(driver *driver.BaseDriver, vmConfig *vz.VirtualMachine
 	if err != nil {
 		return err
 	}
+
+	// nested virt
+	if *driver.Instance.Config.NestedVirtualization {
+		macOSProductVersion, err := osutil.ProductVersion()
+		if err != nil {
+			return fmt.Errorf("failed to get macOS product version: %w", err)
+		}
+
+		if macOSProductVersion.LessThan(*semver.New("15.0.0")) {
+			return errors.New("nested virtualization requires macOS 15 or newer")
+		}
+
+		if !vz.IsNestedVirtualizationSupported() {
+			return errors.New("nested virtualization is not supported on this device")
+		}
+
+		if err := platformConfig.SetNestedVirtualizationEnabled(true); err != nil {
+			return fmt.Errorf("cannot enable nested virtualization: %w", err)
+		}
+	}
+
 	vmConfig.SetPlatformVirtualMachineConfiguration(platformConfig)
 	return nil
 }
@@ -286,7 +303,7 @@ func attachNetwork(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfigu
 	var configurations []*vz.VirtioNetworkDeviceConfiguration
 
 	// Configure default usernetwork with limayaml.MACAddress(driver.Instance.Dir) for eth0 interface
-	firstUsernetIndex := limayaml.FirstUsernetIndex(driver.Yaml)
+	firstUsernetIndex := limayaml.FirstUsernetIndex(driver.Instance.Config)
 	if firstUsernetIndex == -1 {
 		// slirp network using gvisor netstack
 		vzSock, err := usernet.SockWithDirectory(driver.Instance.Dir, "", usernet.FDSock)
@@ -303,7 +320,7 @@ func attachNetwork(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfigu
 		}
 		configurations = append(configurations, networkConfig)
 	} else {
-		vzSock, err := usernet.Sock(driver.Yaml.Networks[firstUsernetIndex].Lima, usernet.FDSock)
+		vzSock, err := usernet.Sock(driver.Instance.Config.Networks[firstUsernetIndex].Lima, usernet.FDSock)
 		if err != nil {
 			return err
 		}
@@ -330,7 +347,7 @@ func attachNetwork(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfigu
 			}
 			configurations = append(configurations, networkConfig)
 		} else if nw.Lima != "" {
-			nwCfg, err := networks.Config()
+			nwCfg, err := networks.LoadConfig()
 			if err != nil {
 				return err
 			}
@@ -451,11 +468,11 @@ func attachDisks(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfigura
 	}
 	configurations = append(configurations, diffDisk)
 
-	for _, d := range driver.Yaml.AdditionalDisks {
+	for _, d := range driver.Instance.Config.AdditionalDisks {
 		diskName := d.Name
 		disk, err := store.InspectDisk(diskName)
 		if err != nil {
-			return fmt.Errorf("failed to run load disk %q: %q", diskName, err)
+			return fmt.Errorf("failed to run load disk %q: %w", diskName, err)
 		}
 
 		if disk.Instance != "" {
@@ -464,7 +481,7 @@ func attachDisks(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfigura
 		logrus.Infof("Mounting disk %q on %q", diskName, disk.MountPoint)
 		err = disk.Lock(driver.Instance.Dir)
 		if err != nil {
-			return fmt.Errorf("failed to run lock disk %q: %q", diskName, err)
+			return fmt.Errorf("failed to run lock disk %q: %w", diskName, err)
 		}
 		extraDiskPath := filepath.Join(disk.Dir, filenames.DataDisk)
 		// ConvertToRaw is a NOP if no conversion is needed
@@ -501,7 +518,7 @@ func attachDisks(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfigura
 }
 
 func attachDisplay(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfiguration) error {
-	switch *driver.Yaml.Video.Display {
+	switch *driver.Instance.Config.Video.Display {
 	case "vz", "default":
 		graphicsDeviceConfiguration, err := vz.NewVirtioGraphicsDeviceConfiguration()
 		if err != nil {
@@ -520,14 +537,14 @@ func attachDisplay(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfigu
 	case "none":
 		return nil
 	default:
-		return fmt.Errorf("unexpected video display %q", *driver.Yaml.Video.Display)
+		return fmt.Errorf("unexpected video display %q", *driver.Instance.Config.Video.Display)
 	}
 }
 
 func attachFolderMounts(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineConfiguration) error {
 	var mounts []vz.DirectorySharingDeviceConfiguration
-	if *driver.Yaml.MountType == limayaml.VIRTIOFS {
-		for i, mount := range driver.Yaml.Mounts {
+	if *driver.Instance.Config.MountType == limayaml.VIRTIOFS {
+		for i, mount := range driver.Instance.Config.Mounts {
 			expandedPath, err := localpathutil.Expand(mount.Location)
 			if err != nil {
 				return err
@@ -558,7 +575,7 @@ func attachFolderMounts(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineCo
 		}
 	}
 
-	if *driver.Yaml.Rosetta.Enabled {
+	if *driver.Instance.Config.Rosetta.Enabled {
 		logrus.Info("Setting up Rosetta share")
 		directorySharingDeviceConfig, err := createRosettaDirectoryShareConfiguration()
 		if err != nil {
@@ -575,7 +592,8 @@ func attachFolderMounts(driver *driver.BaseDriver, vmConfig *vz.VirtualMachineCo
 }
 
 func attachAudio(driver *driver.BaseDriver, config *vz.VirtualMachineConfiguration) error {
-	if *driver.Yaml.Audio.Device == "vz" {
+	switch *driver.Instance.Config.Audio.Device {
+	case "vz", "default":
 		outputStream, err := vz.NewVirtioSoundDeviceHostOutputStreamConfiguration()
 		if err != nil {
 			return err
@@ -588,8 +606,12 @@ func attachAudio(driver *driver.BaseDriver, config *vz.VirtualMachineConfigurati
 		config.SetAudioDevicesVirtualMachineConfiguration([]vz.AudioDeviceConfiguration{
 			soundDeviceConfiguration,
 		})
+		return nil
+	case "", "none":
+		return nil
+	default:
+		return fmt.Errorf("unexpected audio device %q", *driver.Instance.Config.Audio.Device)
 	}
-	return nil
 }
 
 func attachOtherDevices(_ *driver.BaseDriver, vmConfig *vz.VirtualMachineConfiguration) error {
@@ -682,6 +704,47 @@ func getMachineIdentifier(driver *driver.BaseDriver) (*vz.GenericMachineIdentifi
 	return vz.NewGenericMachineIdentifierWithDataPath(identifier)
 }
 
+func bootLoader(driver *driver.BaseDriver) (vz.BootLoader, error) {
+	linuxBootLoader, err := linuxBootLoader(driver)
+	if linuxBootLoader != nil {
+		return linuxBootLoader, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	efiVariableStore, err := getEFI(driver)
+	if err != nil {
+		return nil, err
+	}
+	logrus.Debugf("Using EFI Boot Loader")
+	return vz.NewEFIBootLoader(vz.WithEFIVariableStore(efiVariableStore))
+}
+
+func linuxBootLoader(driver *driver.BaseDriver) (*vz.LinuxBootLoader, error) {
+	kernel := filepath.Join(driver.Instance.Dir, filenames.Kernel)
+	kernelCmdline := filepath.Join(driver.Instance.Dir, filenames.KernelCmdline)
+	initrd := filepath.Join(driver.Instance.Dir, filenames.Initrd)
+	if _, err := os.Stat(kernel); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logrus.Debugf("Kernel file %q not found", kernel)
+		} else {
+			logrus.WithError(err).Debugf("Error while checking kernel file %q", kernel)
+		}
+		return nil, err
+	}
+	var opt []vz.LinuxBootLoaderOption
+	if b, err := os.ReadFile(kernelCmdline); err == nil {
+		logrus.Debugf("Using kernel command line %q", string(b))
+		opt = append(opt, vz.WithCommandLine(string(b)))
+	}
+	if _, err := os.Stat(initrd); err == nil {
+		logrus.Debugf("Using initrd %q", initrd)
+		opt = append(opt, vz.WithInitrd(initrd))
+	}
+	logrus.Debugf("Using Linux Boot Loader with kernel %q", kernel)
+	return vz.NewLinuxBootLoader(kernel, opt...)
+}
+
 func getEFI(driver *driver.BaseDriver) (*vz.EFIVariableStore, error) {
 	efi := filepath.Join(driver.Instance.Dir, filenames.VzEfi)
 	if _, err := os.Stat(efi); os.IsNotExist(err) {
@@ -690,7 +753,7 @@ func getEFI(driver *driver.BaseDriver) (*vz.EFIVariableStore, error) {
 	return vz.NewEFIVariableStore(efi)
 }
 
-func createSockPair() (*os.File, *os.File, error) {
+func createSockPair() (server, client *os.File, _ error) {
 	pairs, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
 	if err != nil {
 		return nil, nil, err
@@ -710,12 +773,12 @@ func createSockPair() (*os.File, *os.File, error) {
 	if err = syscall.SetsockoptInt(clientFD, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024); err != nil {
 		return nil, nil, err
 	}
-	server := os.NewFile(uintptr(serverFD), "server")
-	client := os.NewFile(uintptr(clientFD), "client")
-	runtime.SetFinalizer(server, func(file *os.File) {
+	server = os.NewFile(uintptr(serverFD), "server")
+	client = os.NewFile(uintptr(clientFD), "client")
+	runtime.SetFinalizer(server, func(*os.File) {
 		logrus.Debugf("Server network file GC'ed")
 	})
-	runtime.SetFinalizer(client, func(file *os.File) {
+	runtime.SetFinalizer(client, func(*os.File) {
 		logrus.Debugf("Client network file GC'ed")
 	})
 	vmNetworkFiles = append(vmNetworkFiles, server, client)

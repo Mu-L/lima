@@ -54,6 +54,17 @@ if (-f $instance) {
     exit;
 }
 
+# Check if netcat is available before running tests
+my $nc_path = `command -v nc 2>/dev/null`;
+chomp $nc_path;
+unless ($nc_path) {
+    die "Error: 'nc' (netcat) is not installed on the host system.\n" .
+        "Please install netcat to run this test script:\n" .
+        "  - On macOS: brew install netcat\n" .
+        "  - On Ubuntu/Debian: sudo apt-get install netcat\n" .
+        "  - On RHEL/CentOS: sudo yum install nmap-ncat\n";
+}
+
 # Otherwise $instance must be the name of an already running instance that has been
 # configured with our portForwards settings.
 
@@ -126,7 +137,7 @@ my $ha_log_size = -s $ha_log or die;
 foreach my $id (0..@test-1) {
     my $test = $test[$id];
     my $nc = "nc -l $test->{guest_ip} $test->{guest_port}";
-    if ($instance eq "alpine") {
+    if ($instance =~ /^alpine/) {
         $nc = "nc -l -s $test->{guest_ip} -p $test->{guest_port}";
     }
 

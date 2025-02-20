@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"github.com/lima-vm/lima/pkg/debugutil"
 	"github.com/lima-vm/lima/pkg/version"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -21,10 +22,11 @@ func newApp() *cobra.Command {
 		Version: strings.TrimPrefix(version.Version, "v"),
 	}
 	rootCmd.PersistentFlags().Bool("debug", false, "debug mode")
-	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		debug, _ := cmd.Flags().GetBool("debug")
 		if debug {
 			logrus.SetLevel(logrus.DebugLevel)
+			debugutil.Debug = true
 		}
 		return nil
 	}

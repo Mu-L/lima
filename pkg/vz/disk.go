@@ -1,6 +1,7 @@
 package vz
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,7 +15,7 @@ import (
 	"github.com/lima-vm/lima/pkg/store/filenames"
 )
 
-func EnsureDisk(driver *driver.BaseDriver) error {
+func EnsureDisk(ctx context.Context, driver *driver.BaseDriver) error {
 	diffDisk := filepath.Join(driver.Instance.Dir, filenames.DiffDisk)
 	if _, err := os.Stat(diffDisk); err == nil || !errors.Is(err, os.ErrNotExist) {
 		// disk is already ensured
@@ -22,13 +23,35 @@ func EnsureDisk(driver *driver.BaseDriver) error {
 	}
 
 	baseDisk := filepath.Join(driver.Instance.Dir, filenames.BaseDisk)
+	kernel := filepath.Join(driver.Instance.Dir, filenames.Kernel)
+	kernelCmdline := filepath.Join(driver.Instance.Dir, filenames.KernelCmdline)
+	initrd := filepath.Join(driver.Instance.Dir, filenames.Initrd)
 	if _, err := os.Stat(baseDisk); errors.Is(err, os.ErrNotExist) {
 		var ensuredBaseDisk bool
-		errs := make([]error, len(driver.Yaml.Images))
-		for i, f := range driver.Yaml.Images {
-			if _, err := fileutils.DownloadFile(baseDisk, f.File, true, "the image", *driver.Yaml.Arch); err != nil {
+		errs := make([]error, len(driver.Instance.Config.Images))
+		for i, f := range driver.Instance.Config.Images {
+			if _, err := fileutils.DownloadFile(ctx, baseDisk, f.File, true, "the image", *driver.Instance.Config.Arch); err != nil {
 				errs[i] = err
 				continue
+			}
+			if f.Kernel != nil {
+				// ensure decompress kernel because vz expects it to be decompressed
+				if _, err := fileutils.DownloadFile(ctx, kernel, f.Kernel.File, true, "the kernel", *driver.Instance.Config.Arch); err != nil {
+					errs[i] = err
+					continue
+				}
+				if f.Kernel.Cmdline != "" {
+					if err := os.WriteFile(kernelCmdline, []byte(f.Kernel.Cmdline), 0o644); err != nil {
+						errs[i] = err
+						continue
+					}
+				}
+			}
+			if f.Initrd != nil {
+				if _, err := fileutils.DownloadFile(ctx, initrd, *f.Initrd, false, "the initrd", *driver.Instance.Config.Arch); err != nil {
+					errs[i] = err
+					continue
+				}
 			}
 			ensuredBaseDisk = true
 			break
@@ -37,7 +60,7 @@ func EnsureDisk(driver *driver.BaseDriver) error {
 			return fileutils.Errors(errs)
 		}
 	}
-	diskSize, _ := units.RAMInBytes(*driver.Yaml.Disk)
+	diskSize, _ := units.RAMInBytes(*driver.Instance.Config.Disk)
 	if diskSize == 0 {
 		return nil
 	}

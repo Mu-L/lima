@@ -1,6 +1,7 @@
 package cidata
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -9,11 +10,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/docker/go-units"
+	"github.com/lima-vm/lima/pkg/debugutil"
+	"github.com/lima-vm/lima/pkg/identifierutil"
 	"github.com/lima-vm/lima/pkg/iso9660util"
 	"github.com/lima-vm/lima/pkg/limayaml"
 	"github.com/lima-vm/lima/pkg/localpathutil"
@@ -24,7 +27,6 @@ import (
 	"github.com/lima-vm/lima/pkg/store/filenames"
 	"github.com/lima-vm/lima/pkg/usrlocalsharelima"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/exp/slices"
 )
 
 var netLookupIP = func(host string) []net.IP {
@@ -37,14 +39,14 @@ var netLookupIP = func(host string) []net.IP {
 	return ips
 }
 
-func setupEnv(y *limayaml.LimaYAML, args TemplateArgs) (map[string]string, error) {
+func setupEnv(instConfigEnv map[string]string, propagateProxyEnv bool, slirpGateway string) (map[string]string, error) {
 	// Start with the proxy variables from the system settings.
 	env, err := osutil.ProxySettings()
 	if err != nil {
 		return env, err
 	}
 	// env.* settings from lima.yaml override system settings without giving a warning
-	for name, value := range y.Env {
+	for name, value := range instConfigEnv {
 		env[name] = value
 	}
 	// Current process environment setting override both system settings and env.*
@@ -53,7 +55,7 @@ func setupEnv(y *limayaml.LimaYAML, args TemplateArgs) (map[string]string, error
 	for i, name := range lowerVars {
 		upperVars[i] = strings.ToUpper(name)
 	}
-	if *y.PropagateProxyEnv {
+	if propagateProxyEnv {
 		for _, name := range append(lowerVars, upperVars...) {
 			if value, ok := os.LookupEnv(name); ok {
 				if _, ok := env[name]; ok && value != env[name] {
@@ -79,7 +81,7 @@ func setupEnv(y *limayaml.LimaYAML, args TemplateArgs) (map[string]string, error
 
 			for _, ip := range netLookupIP(u.Hostname()) {
 				if ip.IsLoopback() {
-					newHost := args.SlirpGateway
+					newHost := slirpGateway
 					if u.Port() != "" {
 						newHost = net.JoinHostPort(newHost, u.Port())
 					}
@@ -110,52 +112,55 @@ func setupEnv(y *limayaml.LimaYAML, args TemplateArgs) (map[string]string, error
 	return env, nil
 }
 
-func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort, tcpDNSLocalPort int, nerdctlArchive string, vsockPort int) error {
-	if err := limayaml.Validate(*y, false); err != nil {
-		return err
+func templateArgs(bootScripts bool, instDir, name string, instConfig *limayaml.LimaYAML, udpDNSLocalPort, tcpDNSLocalPort, vsockPort int, virtioPort string) (*TemplateArgs, error) {
+	if err := limayaml.Validate(instConfig, false); err != nil {
+		return nil, err
 	}
-	u, err := osutil.LimaUser(true)
-	if err != nil {
-		return err
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return err
-	}
+	archive := "nerdctl-full.tgz"
 	args := TemplateArgs{
+		Debug:              debugutil.Debug,
+		BootScripts:        bootScripts,
 		Name:               name,
-		User:               u.Username,
-		UID:                uid,
-		Home:               fmt.Sprintf("/home/%s.linux", u.Username),
-		GuestInstallPrefix: *y.GuestInstallPrefix,
-		Containerd:         Containerd{System: *y.Containerd.System, User: *y.Containerd.User},
+		Hostname:           identifierutil.HostnameFromInstName(name), // TODO: support customization
+		User:               *instConfig.User.Name,
+		Comment:            *instConfig.User.Comment,
+		Home:               *instConfig.User.Home,
+		Shell:              *instConfig.User.Shell,
+		UID:                *instConfig.User.UID,
+		GuestInstallPrefix: *instConfig.GuestInstallPrefix,
+		UpgradePackages:    *instConfig.UpgradePackages,
+		Containerd:         Containerd{System: *instConfig.Containerd.System, User: *instConfig.Containerd.User, Archive: archive},
 		SlirpNICName:       networks.SlirpNICName,
 
-		RosettaEnabled: *y.Rosetta.Enabled,
-		RosettaBinFmt:  *y.Rosetta.BinFmt,
-		VMType:         *y.VMType,
+		RosettaEnabled: *instConfig.Rosetta.Enabled,
+		RosettaBinFmt:  *instConfig.Rosetta.BinFmt,
+		VMType:         *instConfig.VMType,
 		VSockPort:      vsockPort,
-		Plain:          *y.Plain,
+		VirtioPort:     virtioPort,
+		Plain:          *instConfig.Plain,
+		TimeZone:       *instConfig.TimeZone,
+		Param:          instConfig.Param,
 	}
 
-	firstUsernetIndex := limayaml.FirstUsernetIndex(y)
+	firstUsernetIndex := limayaml.FirstUsernetIndex(instConfig)
 	var subnet net.IP
+	var err error
 
 	if firstUsernetIndex != -1 {
-		usernetName := y.Networks[firstUsernetIndex].Lima
+		usernetName := instConfig.Networks[firstUsernetIndex].Lima
 		subnet, err = usernet.Subnet(usernetName)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		args.SlirpGateway = usernet.GatewayIP(subnet)
 		args.SlirpDNS = usernet.GatewayIP(subnet)
 	} else {
 		subnet, _, err = net.ParseCIDR(networks.SlirpNetwork)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		args.SlirpGateway = usernet.GatewayIP(subnet)
-		if *y.VMType == limayaml.VZ {
+		if *instConfig.VMType == limayaml.VZ {
 			args.SlirpDNS = usernet.GatewayIP(subnet)
 		} else {
 			args.SlirpDNS = usernet.DNSIP(subnet)
@@ -166,19 +171,19 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 	// change instance id on every boot so network config will be processed again
 	args.IID = fmt.Sprintf("iid-%d", time.Now().Unix())
 
-	pubKeys, err := sshutil.DefaultPubKeys(*y.SSH.LoadDotSSHPubKeys)
+	pubKeys, err := sshutil.DefaultPubKeys(*instConfig.SSH.LoadDotSSHPubKeys)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(pubKeys) == 0 {
-		return errors.New("no SSH key was found, run `ssh-keygen`")
+		return nil, errors.New("no SSH key was found, run `ssh-keygen`")
 	}
 	for _, f := range pubKeys {
 		args.SSHPubKeys = append(args.SSHPubKeys, f.Content)
 	}
 
 	var fstype string
-	switch *y.MountType {
+	switch *instConfig.MountType {
 	case limayaml.REVSSHFS:
 		fstype = "sshfs"
 	case limayaml.NINEP:
@@ -188,17 +193,17 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 	}
 	hostHome, err := localpathutil.Expand("~")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for i, f := range y.Mounts {
+	for i, f := range instConfig.Mounts {
 		tag := fmt.Sprintf("mount%d", i)
 		location, err := localpathutil.Expand(f.Location)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		mountPoint, err := localpathutil.Expand(f.MountPoint)
+		mountPoint, err := localpathutil.Expand(*f.MountPoint)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		options := "defaults"
 		switch fstype {
@@ -212,7 +217,7 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 				options += fmt.Sprintf(",version=%s", *f.NineP.ProtocolVersion)
 				msize, err := units.RAMInBytes(*f.NineP.Msize)
 				if err != nil {
-					return fmt.Errorf("failed to parse msize for %q: %w", location, err)
+					return nil, fmt.Errorf("failed to parse msize for %q: %w", location, err)
 				}
 				options += fmt.Sprintf(",msize=%d", msize)
 				options += fmt.Sprintf(",cache=%s", *f.NineP.Cache)
@@ -226,7 +231,7 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 		}
 	}
 
-	switch *y.MountType {
+	switch *instConfig.MountType {
 	case limayaml.REVSSHFS:
 		args.MountType = "reverse-sshfs"
 	case limayaml.NINEP:
@@ -235,7 +240,7 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 		args.MountType = "virtiofs"
 	}
 
-	for i, d := range y.AdditionalDisks {
+	for i, d := range instConfig.AdditionalDisks {
 		format := true
 		if d.Format != nil {
 			format = *d.Format
@@ -253,76 +258,115 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 		})
 	}
 
-	args.Networks = append(args.Networks, Network{MACAddress: limayaml.MACAddress(instDir), Interface: networks.SlirpNICName})
-	for i, nw := range y.Networks {
+	args.Networks = append(args.Networks, Network{MACAddress: limayaml.MACAddress(instDir), Interface: networks.SlirpNICName, Metric: 200})
+	for i, nw := range instConfig.Networks {
 		if i == firstUsernetIndex {
 			continue
 		}
-		args.Networks = append(args.Networks, Network{MACAddress: nw.MACAddress, Interface: nw.Interface})
+		args.Networks = append(args.Networks, Network{MACAddress: nw.MACAddress, Interface: nw.Interface, Metric: *nw.Metric})
 	}
 
-	args.Env, err = setupEnv(y, args)
+	args.Env, err = setupEnv(instConfig.Env, *instConfig.PropagateProxyEnv, args.SlirpGateway)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if len(y.DNS) > 0 {
-		for _, addr := range y.DNS {
+	switch {
+	case len(instConfig.DNS) > 0:
+		for _, addr := range instConfig.DNS {
 			args.DNSAddresses = append(args.DNSAddresses, addr.String())
 		}
-	} else if firstUsernetIndex != -1 || *y.VMType == limayaml.VZ {
+	case firstUsernetIndex != -1 || *instConfig.VMType == limayaml.VZ:
 		args.DNSAddresses = append(args.DNSAddresses, args.SlirpDNS)
-	} else if *y.HostResolver.Enabled {
+	case *instConfig.HostResolver.Enabled:
 		args.UDPDNSLocalPort = udpDNSLocalPort
 		args.TCPDNSLocalPort = tcpDNSLocalPort
 		args.DNSAddresses = append(args.DNSAddresses, args.SlirpDNS)
-	} else {
+	default:
 		args.DNSAddresses, err = osutil.DNSAddresses()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	args.CACerts.RemoveDefaults = y.CACertificates.RemoveDefaults
+	args.CACerts.RemoveDefaults = instConfig.CACertificates.RemoveDefaults
 
-	for _, path := range y.CACertificates.Files {
+	for _, path := range instConfig.CACertificates.Files {
 		expanded, err := localpathutil.Expand(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		content, err := os.ReadFile(expanded)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		cert := getCert(string(content))
 		args.CACerts.Trusted = append(args.CACerts.Trusted, cert)
 	}
 
-	for _, content := range y.CACertificates.Certs {
+	for _, content := range instConfig.CACertificates.Certs {
 		cert := getCert(content)
 		args.CACerts.Trusted = append(args.CACerts.Trusted, cert)
 	}
 
-	args.BootCmds = getBootCmds(y.Provision)
+	// Remove empty caCerts (default values) from configuration yaml
+	if !*args.CACerts.RemoveDefaults && len(args.CACerts.Trusted) == 0 {
+		args.CACerts.RemoveDefaults = nil
+		args.CACerts.Trusted = nil
+	}
 
-	for _, f := range y.Provision {
+	args.BootCmds = getBootCmds(instConfig.Provision)
+
+	for _, f := range instConfig.Provision {
 		if f.Mode == limayaml.ProvisionModeDependency && *f.SkipDefaultDependencyResolution {
 			args.SkipDefaultDependencyResolution = true
 		}
+	}
+
+	return &args, nil
+}
+
+func GenerateCloudConfig(instDir, name string, instConfig *limayaml.LimaYAML) error {
+	args, err := templateArgs(false, instDir, name, instConfig, 0, 0, 0, "")
+	if err != nil {
+		return err
+	}
+	// mounts are not included here
+	args.Mounts = nil
+	// resolv_conf is not included here
+	args.DNSAddresses = nil
+
+	if err := ValidateTemplateArgs(args); err != nil {
+		return err
+	}
+
+	config, err := ExecuteTemplateCloudConfig(args)
+	if err != nil {
+		return err
+	}
+
+	os.RemoveAll(filepath.Join(instDir, filenames.CloudConfig)) // delete existing
+	return os.WriteFile(filepath.Join(instDir, filenames.CloudConfig), config, 0o444)
+}
+
+func GenerateISO9660(instDir, name string, instConfig *limayaml.LimaYAML, udpDNSLocalPort, tcpDNSLocalPort int, nerdctlArchive string, vsockPort int, virtioPort string) error {
+	args, err := templateArgs(true, instDir, name, instConfig, udpDNSLocalPort, tcpDNSLocalPort, vsockPort, virtioPort)
+	if err != nil {
+		return err
 	}
 
 	if err := ValidateTemplateArgs(args); err != nil {
 		return err
 	}
 
-	layout, err := ExecuteTemplate(args)
+	layout, err := ExecuteTemplateCIDataISO(args)
 	if err != nil {
 		return err
 	}
 
-	for i, f := range y.Provision {
+	for i, f := range instConfig.Provision {
 		switch f.Mode {
 		case limayaml.ProvisionModeSystem, limayaml.ProvisionModeUser, limayaml.ProvisionModeDependency:
 			layout = append(layout, iso9660util.Entry{
@@ -331,22 +375,41 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 			})
 		case limayaml.ProvisionModeBoot:
 			continue
+		case limayaml.ProvisionModeAnsible:
+			continue
 		default:
 			return fmt.Errorf("unknown provision mode %q", f.Mode)
 		}
 	}
 
-	guestAgentBinary, err := GuestAgentBinary(*y.OS, *y.Arch)
+	guestAgentBinary, err := usrlocalsharelima.GuestAgentBinary(*instConfig.OS, *instConfig.Arch)
 	if err != nil {
 		return err
 	}
-	defer guestAgentBinary.Close()
+	var guestAgent io.ReadCloser
+	guestAgent, err = os.Open(guestAgentBinary)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		compressedGuestAgent, err := os.Open(guestAgentBinary + ".gz")
+		if err != nil {
+			return err
+		}
+		logrus.Debugf("Decompressing %s.gz", guestAgentBinary)
+		guestAgent, err = gzip.NewReader(compressedGuestAgent)
+		if err != nil {
+			return err
+		}
+	}
+	defer guestAgent.Close()
 	layout = append(layout, iso9660util.Entry{
 		Path:   "lima-guestagent",
-		Reader: guestAgentBinary,
+		Reader: guestAgent,
 	})
 
 	if nerdctlArchive != "" {
+		nftgz := args.Containerd.Archive
 		nftgzR, err := os.Open(nerdctlArchive)
 		if err != nil {
 			return err
@@ -354,7 +417,7 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 		defer nftgzR.Close()
 		layout = append(layout, iso9660util.Entry{
 			// ISO9660 requires len(Path) <= 30
-			Path:   "nerdctl-full.tgz",
+			Path:   nftgz,
 			Reader: nftgzR,
 		})
 	}
@@ -368,21 +431,6 @@ func GenerateISO9660(instDir, name string, y *limayaml.LimaYAML, udpDNSLocalPort
 	}
 
 	return iso9660util.Write(filepath.Join(instDir, filenames.CIDataISO), "cidata", layout)
-}
-
-func GuestAgentBinary(ostype limayaml.OS, arch limayaml.Arch) (io.ReadCloser, error) {
-	if ostype == "" {
-		return nil, errors.New("os must be set")
-	}
-	if arch == "" {
-		return nil, errors.New("arch must be set")
-	}
-	dir, err := usrlocalsharelima.Dir()
-	if err != nil {
-		return nil, err
-	}
-	gaPath := filepath.Join(dir, "lima-guestagent."+ostype+"-"+arch)
-	return os.Open(gaPath)
 }
 
 func getCert(content string) Cert {
@@ -437,10 +485,11 @@ func writeCIDataDir(rootPath string, layout []iso9660util.Entry) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
 		if _, err := io.Copy(f, e.Reader); err != nil {
+			_ = f.Close()
 			return err
 		}
+		_ = f.Close()
 	}
 
 	return nil

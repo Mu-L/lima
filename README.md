@@ -1,10 +1,16 @@
 [[🌎**Web site**]](https://lima-vm.io/)
-[[📖**Documentations**]](https://lima-vm.io/docs/)
+[[📖**Documentation**]](https://lima-vm.io/docs/)
 [[👤**Slack (`#lima`)**]](https://slack.cncf.io)
 
-<img src="https://lima-vm.io/images/logo.svg" width=400 />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="website/static/images/logo-dark.svg">
+  <img alt="Shows a stylized 'Lima' text in bold, modern font" src="website/static/images/logo.svg" width=400 />
+</picture>
 
 # Lima: Linux Machines
+
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/6505/badge)](https://www.bestpractices.dev/projects/6505)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lima-vm/lima/badge)](https://scorecard.dev/viewer/?uri=github.com/lima-vm/lima)
 
 [Lima](https://lima-vm.io/) launches Linux virtual machines with automatic file sharing and port forwarding (similar to WSL2).
 
@@ -48,7 +54,6 @@ kubectl apply -f ...
 See <https://lima-vm.io/docs/> for the further information.
 
 ## Community
-<!-- TODO: move or copy the most of this section to https://lima-vm.io/community/ -->
 ### Adopters
 
 Container environments:
@@ -73,6 +78,9 @@ Lima follows the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/
 - - -
 **We are a [Cloud Native Computing Foundation](https://cncf.io/) sandbox project.**
 
-<img src="https://www.cncf.io/wp-content/uploads/2022/07/cncf-color-bg.svg" width=300 />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://www.cncf.io/wp-content/uploads/2022/07/cncf-white-logo.svg">
+  <img src="https://www.cncf.io/wp-content/uploads/2022/07/cncf-color-bg.svg" width=300 />
+</picture>
 
-The Linux Foundation® (TLF) has registered trademarks and uses trademarks. For a list of TLF trademarks, see [Trademark Usage](https://www.linuxfoundation.org/trademark-usage/).
+The Linux Foundation® (TLF) has registered trademarks and uses trademarks. For a list of TLF trademarks, see [Trademark Usage](https://www.linuxfoundation.org/legal/trademark-usage).

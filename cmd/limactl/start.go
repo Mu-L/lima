@@ -1,29 +1,24 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
-	"github.com/AlecAivazis/survey/v2"
-	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/containerd/containerd/identifiers"
 	"github.com/lima-vm/lima/cmd/limactl/editflags"
-	"github.com/lima-vm/lima/cmd/limactl/guessarg"
 	"github.com/lima-vm/lima/pkg/editutil"
-	"github.com/lima-vm/lima/pkg/ioutilx"
+	"github.com/lima-vm/lima/pkg/instance"
+	"github.com/lima-vm/lima/pkg/limatmpl"
 	"github.com/lima-vm/lima/pkg/limayaml"
 	networks "github.com/lima-vm/lima/pkg/networks/reconcile"
-	"github.com/lima-vm/lima/pkg/osutil"
-	"github.com/lima-vm/lima/pkg/start"
 	"github.com/lima-vm/lima/pkg/store"
 	"github.com/lima-vm/lima/pkg/store/filenames"
 	"github.com/lima-vm/lima/pkg/templatestore"
+	"github.com/lima-vm/lima/pkg/uiutil"
 	"github.com/lima-vm/lima/pkg/yqutil"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -59,7 +54,7 @@ To create an instance "default" from a local file:
 $ limactl create --name=default /usr/local/share/lima/templates/fedora.yaml
 
 To create an instance "default" from a remote URL (use carefully, with a trustable source):
-$ limactl create --name=default https://raw.githubusercontent.com/lima-vm/lima/master/examples/alpine.yaml
+$ limactl create --name=default https://raw.githubusercontent.com/lima-vm/lima/master/templates/alpine.yaml
 
 To create an instance "local" from a template passed to stdin (--name parameter is required):
 $ cat template.yaml | limactl create --name=local -
@@ -68,6 +63,7 @@ $ cat template.yaml | limactl create --name=local -
 		Args:              WrapArgsError(cobra.MaximumNArgs(1)),
 		ValidArgsFunction: createBashComplete,
 		RunE:              createAction,
+		GroupID:           basicCommand,
 	}
 	registerCreateFlags(createCommand, "")
 	return createCommand
@@ -90,9 +86,13 @@ See the examples in 'limactl create --help'.
 		Args:              WrapArgsError(cobra.MaximumNArgs(1)),
 		ValidArgsFunction: startBashComplete,
 		RunE:              startAction,
+		GroupID:           basicCommand,
 	}
 	registerCreateFlags(startCommand, "[limactl create] ")
-	startCommand.Flags().Duration("timeout", start.DefaultWatchHostAgentEventsTimeout, "duration to wait for the instance to be running before timing out")
+	if runtime.GOOS != "windows" {
+		startCommand.Flags().Bool("foreground", false, "run the hostagent in the foreground")
+	}
+	startCommand.Flags().Duration("timeout", instance.DefaultWatchHostAgentEventsTimeout, "duration to wait for the instance to be running before timing out")
 	return startCommand
 }
 
@@ -102,11 +102,6 @@ func loadOrCreateInstance(cmd *cobra.Command, args []string, createOnly bool) (*
 		arg = args[0]
 	}
 
-	var (
-		st  = &creatorState{}
-		err error
-	)
-
 	flags := cmd.Flags()
 
 	// Create an instance, with menu TUI when TTY is available
@@ -115,83 +110,33 @@ func loadOrCreateInstance(cmd *cobra.Command, args []string, createOnly bool) (*
 		return nil, err
 	}
 
-	st.instName, err = flags.GetString("name")
+	name, err := flags.GetString("name")
 	if err != nil {
 		return nil, err
 	}
-
-	const yBytesLimit = 4 * 1024 * 1024 // 4MiB
-
-	if ok, u := guessarg.SeemsTemplateURL(arg); ok {
+	if isTemplateURL, templateURL := limatmpl.SeemsTemplateURL(arg); isTemplateURL {
 		// No need to use SecureJoin here. https://github.com/lima-vm/lima/pull/805#discussion_r853411702
-		templateName := filepath.Join(u.Host, u.Path)
-		logrus.Debugf("interpreting argument %q as a template name %q", arg, templateName)
-		if st.instName == "" {
-			// e.g., templateName = "deprecated/centos-7" , st.instName = "centos-7"
-			st.instName = filepath.Base(templateName)
+		templateName := filepath.Join(templateURL.Host, templateURL.Path)
+		switch templateName {
+		case "experimental/vz":
+			logrus.Warn("template://experimental/vz was merged into the default template in Lima v1.0. See also <https://lima-vm.io/docs/config/vmtype/>.")
+		case "experimental/riscv64":
+			logrus.Warn("template://experimental/riscv64 was merged into the default template in Lima v1.0. Use `limactl create --arch=riscv64 template://default` instead.")
+		case "experimental/armv7l":
+			logrus.Warn("template://experimental/armv7l was merged into the default template in Lima v1.0. Use `limactl create --arch=armv7l template://default` instead.")
+		case "vmnet":
+			logrus.Warn("template://vmnet was removed in Lima v1.0. Use `limactl create --network=lima:shared template://default` instead. See also <https://lima-vm.io/docs/config/network/>.")
+		case "experimental/net-user-v2":
+			logrus.Warn("template://experimental/net-user-v2 was removed in Lima v1.0. Use `limactl create --network=lima:user-v2 template://default` instead. See also <https://lima-vm.io/docs/config/network/>.")
+		case "experimental/9p":
+			logrus.Warn("template://experimental/9p was removed in Lima v1.0. Use `limactl create --vm-type=qemu --mount-type=9p template://default` instead. See also <https://lima-vm.io/docs/config/mount/>.")
+		case "experimental/virtiofs-linux":
+			logrus.Warn("template://experimental/virtiofs-linux was removed in Lima v1.0. Use `limactl create --mount-type=virtiofs template://default` instead. See also <https://lima-vm.io/docs/config/mount/>.")
 		}
-		st.yBytes, err = templatestore.Read(templateName)
-		if err != nil {
-			return nil, err
-		}
-	} else if guessarg.SeemsHTTPURL(arg) {
-		if st.instName == "" {
-			st.instName, err = guessarg.InstNameFromURL(arg)
-			if err != nil {
-				return nil, err
-			}
-		}
-		logrus.Debugf("interpreting argument %q as a http url for instance %q", arg, st.instName)
-		resp, err := http.Get(arg)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		st.yBytes, err = ioutilx.ReadAtMaximum(resp.Body, yBytesLimit)
-		if err != nil {
-			return nil, err
-		}
-	} else if guessarg.SeemsFileURL(arg) {
-		if st.instName == "" {
-			st.instName, err = guessarg.InstNameFromURL(arg)
-			if err != nil {
-				return nil, err
-			}
-		}
-		logrus.Debugf("interpreting argument %q as a file url for instance %q", arg, st.instName)
-		r, err := os.Open(strings.TrimPrefix(arg, "file://"))
-		if err != nil {
-			return nil, err
-		}
-		defer r.Close()
-		st.yBytes, err = ioutilx.ReadAtMaximum(r, yBytesLimit)
-		if err != nil {
-			return nil, err
-		}
-	} else if guessarg.SeemsYAMLPath(arg) {
-		if st.instName == "" {
-			st.instName, err = guessarg.InstNameFromYAMLPath(arg)
-			if err != nil {
-				return nil, err
-			}
-		}
-		logrus.Debugf("interpreting argument %q as a file path for instance %q", arg, st.instName)
-		r, err := os.Open(arg)
-		if err != nil {
-			return nil, err
-		}
-		defer r.Close()
-		st.yBytes, err = ioutilx.ReadAtMaximum(r, yBytesLimit)
-		if err != nil {
-			return nil, err
-		}
-	} else if arg == "-" {
-		if st.instName == "" {
+	}
+	if arg == "-" {
+		if name == "" {
 			return nil, errors.New("must pass instance name with --name when reading template from stdin")
-		}
-		st.yBytes, err = io.ReadAll(os.Stdin)
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("unexpected error reading stdin: %w", err)
 		}
 		// see if the tty was set explicitly or not
 		ttySet := cmd.Flags().Changed("tty")
@@ -199,27 +144,38 @@ func loadOrCreateInstance(cmd *cobra.Command, args []string, createOnly bool) (*
 			return nil, errors.New("cannot use --tty=true and read template from stdin together")
 		}
 		tty = false
+	}
+	tmpl, err := limatmpl.Read(cmd.Context(), name, arg)
+	if err != nil {
+		return nil, err
+	}
+	if len(tmpl.Bytes) > 0 {
+		if createOnly {
+			if _, err := store.Inspect(tmpl.Name); err == nil {
+				return nil, fmt.Errorf("instance %q already exists", tmpl.Name)
+			}
+		}
 	} else {
 		if arg == "" {
-			if st.instName == "" {
-				st.instName = DefaultInstanceName
+			if tmpl.Name == "" {
+				tmpl.Name = DefaultInstanceName
 			}
 		} else {
 			logrus.Debugf("interpreting argument %q as an instance name", arg)
-			if st.instName != "" && st.instName != arg {
-				return nil, fmt.Errorf("instance name %q and CLI flag --name=%q cannot be specified together", arg, st.instName)
+			if tmpl.Name != "" && tmpl.Name != arg {
+				return nil, fmt.Errorf("instance name %q and CLI flag --name=%q cannot be specified together", arg, tmpl.Name)
 			}
-			st.instName = arg
+			tmpl.Name = arg
 		}
-		if err := identifiers.Validate(st.instName); err != nil {
-			return nil, fmt.Errorf("argument must be either an instance name, a YAML file path, or a URL, got %q: %w", st.instName, err)
+		if err := identifiers.Validate(tmpl.Name); err != nil {
+			return nil, fmt.Errorf("argument must be either an instance name, a YAML file path, or a URL, got %q: %w", tmpl.Name, err)
 		}
-		inst, err := store.Inspect(st.instName)
+		inst, err := store.Inspect(tmpl.Name)
 		if err == nil {
 			if createOnly {
-				return nil, fmt.Errorf("Instance %q already exists", st.instName)
+				return nil, fmt.Errorf("instance %q already exists", tmpl.Name)
 			}
-			logrus.Infof("Using the existing instance %q", st.instName)
+			logrus.Infof("Using the existing instance %q", tmpl.Name)
 			yqExprs, err := editflags.YQExpressions(flags, false)
 			if err != nil {
 				return nil, err
@@ -228,7 +184,7 @@ func loadOrCreateInstance(cmd *cobra.Command, args []string, createOnly bool) (*
 				yq := yqutil.Join(yqExprs)
 				inst, err = applyYQExpressionToExistingInstance(inst, yq)
 				if err != nil {
-					return nil, fmt.Errorf("failed to apply yq expression %q to instance %q: %w", yq, st.instName, err)
+					return nil, fmt.Errorf("failed to apply yq expression %q to instance %q: %w", yq, tmpl.Name, err)
 				}
 			}
 			return inst, nil
@@ -237,11 +193,11 @@ func loadOrCreateInstance(cmd *cobra.Command, args []string, createOnly bool) (*
 			return nil, err
 		}
 		if arg != "" && arg != DefaultInstanceName {
-			logrus.Infof("Creating an instance %q from template://default (Not from template://%s)", st.instName, st.instName)
-			logrus.Warnf("This form is deprecated. Use `limactl create --name=%s template://default` instead", st.instName)
+			logrus.Infof("Creating an instance %q from template://default (Not from template://%s)", tmpl.Name, tmpl.Name)
+			logrus.Warnf("This form is deprecated. Use `limactl create --name=%s template://default` instead", tmpl.Name)
 		}
 		// Read the default template for creating a new instance
-		st.yBytes, err = templatestore.Read(templatestore.Default)
+		tmpl.Bytes, err = templatestore.Read(templatestore.Default)
 		if err != nil {
 			return nil, err
 		}
@@ -254,18 +210,18 @@ func loadOrCreateInstance(cmd *cobra.Command, args []string, createOnly bool) (*
 	yq := yqutil.Join(yqExprs)
 	if tty {
 		var err error
-		st, err = chooseNextCreatorState(st, yq)
+		tmpl, err = chooseNextCreatorState(tmpl, yq)
 		if err != nil {
 			return nil, err
 		}
 	} else {
 		logrus.Info("Terminal is not available, proceeding without opening an editor")
-		if err := modifyInPlace(st, yq); err != nil {
+		if err := modifyInPlace(tmpl, yq); err != nil {
 			return nil, err
 		}
 	}
-	saveBrokenEditorBuffer := tty
-	return createInstance(cmd.Context(), st, saveBrokenEditorBuffer)
+	saveBrokenYAML := tty
+	return instance.Create(cmd.Context(), tmpl.Name, tmpl.Bytes, saveBrokenYAML)
 }
 
 func applyYQExpressionToExistingInstance(inst *store.Instance, yq string) (*store.Instance, error) {
@@ -282,6 +238,18 @@ func applyYQExpressionToExistingInstance(inst *store.Instance, yq string) (*stor
 	if err != nil {
 		return nil, err
 	}
+	y, err := limayaml.Load(yBytes, filePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := limayaml.Validate(y, true); err != nil {
+		rejectedYAML := "lima.REJECTED.yaml"
+		if writeErr := os.WriteFile(rejectedYAML, yBytes, 0o644); writeErr != nil {
+			return nil, fmt.Errorf("the YAML is invalid, attempted to save the buffer as %q but failed: %w: %w", rejectedYAML, writeErr, err)
+		}
+		// TODO: may need to support editing the rejected YAML
+		return nil, fmt.Errorf("the YAML is invalid, saved the buffer as %q: %w", rejectedYAML, err)
+	}
 	if err := os.WriteFile(filePath, yBytes, 0o644); err != nil {
 		return nil, err
 	}
@@ -289,158 +257,106 @@ func applyYQExpressionToExistingInstance(inst *store.Instance, yq string) (*stor
 	return store.Inspect(inst.Name)
 }
 
-func createInstance(ctx context.Context, st *creatorState, saveBrokenEditorBuffer bool) (*store.Instance, error) {
-	if st.instName == "" {
-		return nil, errors.New("got empty st.instName")
-	}
-	if len(st.yBytes) == 0 {
-		return nil, errors.New("got empty st.yBytes")
-	}
-
-	instDir, err := store.InstanceDir(st.instName)
-	if err != nil {
-		return nil, err
-	}
-
-	// the full path of the socket name must be less than UNIX_PATH_MAX chars.
-	maxSockName := filepath.Join(instDir, filenames.LongestSock)
-	if len(maxSockName) >= osutil.UnixPathMax {
-		return nil, fmt.Errorf("instance name %q too long: %q must be less than UNIX_PATH_MAX=%d characters, but is %d",
-			st.instName, maxSockName, osutil.UnixPathMax, len(maxSockName))
-	}
-	if _, err := os.Stat(instDir); !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("instance %q already exists (%q)", st.instName, instDir)
-	}
-	// limayaml.Load() needs to pass the store file path to limayaml.FillDefault() to calculate default MAC addresses
-	filePath := filepath.Join(instDir, filenames.LimaYAML)
-	y, err := limayaml.Load(st.yBytes, filePath)
-	if err != nil {
-		return nil, err
-	}
-	if err := limayaml.Validate(*y, true); err != nil {
-		if !saveBrokenEditorBuffer {
-			return nil, err
-		}
-		rejectedYAML := "lima.REJECTED.yaml"
-		if writeErr := os.WriteFile(rejectedYAML, st.yBytes, 0o644); writeErr != nil {
-			return nil, fmt.Errorf("the YAML is invalid, attempted to save the buffer as %q but failed: %v: %w", rejectedYAML, writeErr, err)
-		}
-		return nil, fmt.Errorf("the YAML is invalid, saved the buffer as %q: %w", rejectedYAML, err)
-	}
-	if err := os.MkdirAll(instDir, 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filePath, st.yBytes, 0o644); err != nil {
-		return nil, err
-	}
-
-	inst, err := store.Inspect(st.instName)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := start.Register(ctx, inst); err != nil {
-		return nil, err
-	}
-
-	return inst, nil
-}
-
-type creatorState struct {
-	instName string // instance name
-	yBytes   []byte // yaml bytes
-}
-
-func modifyInPlace(st *creatorState, yq string) error {
-	out, err := yqutil.EvaluateExpression(yq, st.yBytes)
+func modifyInPlace(st *limatmpl.Template, yq string) error {
+	out, err := yqutil.EvaluateExpression(yq, st.Bytes)
 	if err != nil {
 		return err
 	}
-	st.yBytes = out
+	st.Bytes = out
 	return nil
 }
 
-func chooseNextCreatorState(st *creatorState, yq string) (*creatorState, error) {
+// exitSuccessError is an error that indicates a successful exit.
+type exitSuccessError struct {
+	Msg string
+}
+
+// Error implements error.
+func (e exitSuccessError) Error() string {
+	return e.Msg
+}
+
+// ExitCode implements ExitCoder.
+func (exitSuccessError) ExitCode() int {
+	return 0
+}
+
+func chooseNextCreatorState(tmpl *limatmpl.Template, yq string) (*limatmpl.Template, error) {
 	for {
-		if err := modifyInPlace(st, yq); err != nil {
+		if err := modifyInPlace(tmpl, yq); err != nil {
 			logrus.WithError(err).Warn("Failed to evaluate yq expression")
-			return st, err
+			return tmpl, err
 		}
-		var ans string
-		prompt := &survey.Select{
-			Message: fmt.Sprintf("Creating an instance %q", st.instName),
-			Options: []string{
-				"Proceed with the current configuration",
-				"Open an editor to review or modify the current configuration",
-				"Choose another template (docker, podman, archlinux, fedora, ...)",
-				"Exit",
-			},
+		message := fmt.Sprintf("Creating an instance %q", tmpl.Name)
+		options := []string{
+			"Proceed with the current configuration",
+			"Open an editor to review or modify the current configuration",
+			"Choose another template (docker, podman, archlinux, fedora, ...)",
+			"Exit",
 		}
-		if err := survey.AskOne(prompt, &ans); err != nil {
-			if err == terminal.InterruptErr {
+		ans, err := uiutil.Select(message, options)
+		if err != nil {
+			if errors.Is(err, uiutil.InterruptErr) {
 				logrus.Fatal("Interrupted by user")
 			}
 			logrus.WithError(err).Warn("Failed to open TUI")
-			return st, nil
+			return tmpl, nil
 		}
 		switch ans {
-		case prompt.Options[0]: // "Proceed with the current configuration"
-			return st, nil
-		case prompt.Options[1]: // "Open an editor ..."
-			hdr := fmt.Sprintf("# Review and modify the following configuration for Lima instance %q.\n", st.instName)
-			if st.instName == DefaultInstanceName {
+		case 0: // "Proceed with the current configuration"
+			return tmpl, nil
+		case 1: // "Open an editor ..."
+			hdr := fmt.Sprintf("# Review and modify the following configuration for Lima instance %q.\n", tmpl.Name)
+			if tmpl.Name == DefaultInstanceName {
 				hdr += "# - In most cases, you do not need to modify this file.\n"
 			}
 			hdr += "# - To cancel starting Lima, just save this file as an empty file.\n"
 			hdr += "\n"
 			hdr += editutil.GenerateEditorWarningHeader()
 			var err error
-			st.yBytes, err = editutil.OpenEditor(st.yBytes, hdr)
+			tmpl.Bytes, err = editutil.OpenEditor(tmpl.Bytes, hdr)
 			if err != nil {
-				return st, err
+				return tmpl, err
 			}
-			if len(st.yBytes) == 0 {
-				logrus.Info("Aborting, as requested by saving the file with empty content")
-				os.Exit(0)
-				return st, errors.New("should not reach here")
+			if len(tmpl.Bytes) == 0 {
+				const msg = "Aborting, as requested by saving the file with empty content"
+				logrus.Info(msg)
+				return nil, exitSuccessError{Msg: msg}
 			}
-			return st, nil
-		case prompt.Options[2]: // "Choose another template..."
+			return tmpl, nil
+		case 2: // "Choose another template..."
 			templates, err := templatestore.Templates()
 			if err != nil {
-				return st, err
+				return tmpl, err
 			}
-			var ansEx int
-			promptEx := &survey.Select{
-				Message: "Choose a template",
-				Options: make([]string, len(templates)),
-			}
+			message := "Choose a template"
+			options := make([]string, len(templates))
 			for i := range templates {
-				promptEx.Options[i] = templates[i].Name
+				options[i] = templates[i].Name
 			}
-			if err := survey.AskOne(promptEx, &ansEx); err != nil {
-				return st, err
+			ansEx, err := uiutil.Select(message, options)
+			if err != nil {
+				return tmpl, err
 			}
 			if ansEx > len(templates)-1 {
-				return st, fmt.Errorf("invalid answer %d for %d entries", ansEx, len(templates))
+				return tmpl, fmt.Errorf("invalid answer %d for %d entries", ansEx, len(templates))
 			}
 			yamlPath := templates[ansEx].Location
-			if st.instName == "" {
-				st.instName, err = guessarg.InstNameFromYAMLPath(yamlPath)
+			if tmpl.Name == "" {
+				tmpl.Name, err = limatmpl.InstNameFromYAMLPath(yamlPath)
 				if err != nil {
 					return nil, err
 				}
 			}
-			st.yBytes, err = os.ReadFile(yamlPath)
+			tmpl.Bytes, err = os.ReadFile(yamlPath)
 			if err != nil {
 				return nil, err
 			}
 			continue
-		case prompt.Options[3]: // "Exit"
-			os.Exit(0)
-			return st, errors.New("should not reach here")
+		case 3: // "Exit"
+			return nil, exitSuccessError{Msg: "Choosing to exit"}
 		default:
-			return st, fmt.Errorf("unexpected answer %q", ans)
+			return tmpl, fmt.Errorf("unexpected answer %q", ans)
 		}
 	}
 }
@@ -453,7 +369,7 @@ func createStartActionCommon(cmd *cobra.Command, _ []string) (exit bool, err err
 		if templates, err := templatestore.Templates(); err == nil {
 			w := cmd.OutOrStdout()
 			for _, f := range templates {
-				fmt.Fprintln(w, f.Name)
+				_, _ = fmt.Fprintln(w, f.Name)
 			}
 			return true, nil
 		}
@@ -474,7 +390,7 @@ func createAction(cmd *cobra.Command, args []string) error {
 	if len(inst.Errors) > 0 {
 		return fmt.Errorf("errors inspecting instance: %+v", inst.Errors)
 	}
-	if _, err = start.Prepare(cmd.Context(), inst); err != nil {
+	if _, err = instance.Prepare(cmd.Context(), inst); err != nil {
 		return err
 	}
 	logrus.Infof("Run `limactl start %s` to start the instance.", inst.Name)
@@ -497,7 +413,7 @@ func startAction(cmd *cobra.Command, args []string) error {
 	switch inst.Status {
 	case store.StatusRunning:
 		logrus.Infof("The instance %q is already running. Run `%s` to open the shell.",
-			inst.Name, start.LimactlShellCmd(inst.Name))
+			inst.Name, instance.LimactlShellCmd(inst.Name))
 		// Not an error
 		return nil
 	case store.StatusStopped:
@@ -511,15 +427,23 @@ func startAction(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	launchHostAgentForeground := false
+	if runtime.GOOS != "windows" {
+		foreground, err := cmd.Flags().GetBool("foreground")
+		if err != nil {
+			return err
+		}
+		launchHostAgentForeground = foreground
+	}
 	timeout, err := cmd.Flags().GetDuration("timeout")
 	if err != nil {
 		return err
 	}
 	if timeout > 0 {
-		ctx = start.WithWatchHostAgentTimeout(ctx, timeout)
+		ctx = instance.WithWatchHostAgentTimeout(ctx, timeout)
 	}
 
-	return start.Start(ctx, inst)
+	return instance.Start(ctx, inst, "", launchHostAgentForeground)
 }
 
 func createBashComplete(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {

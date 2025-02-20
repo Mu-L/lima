@@ -12,7 +12,7 @@ import (
 	"golang.org/x/text/transform"
 )
 
-// ReadAtMaximum reands n at maximum.
+// ReadAtMaximum reads n at maximum.
 func ReadAtMaximum(r io.Reader, n int64) ([]byte, error) {
 	lr := &io.LimitedReader{
 		R: r,
@@ -29,7 +29,7 @@ func ReadAtMaximum(r io.Reader, n int64) ([]byte, error) {
 
 // FromUTF16le returns an io.Reader for UTF16le data.
 // Windows uses little endian by default, use unicode.UseBOM policy to retrieve BOM from the text,
-// and unicode.LittleEndian as a fallback
+// and unicode.LittleEndian as a fallback.
 func FromUTF16le(r io.Reader) io.Reader {
 	o := transform.NewReader(r, unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder())
 	return o

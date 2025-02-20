@@ -3,6 +3,7 @@ package hostagent
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lima-vm/lima/pkg/limayaml"
@@ -41,9 +42,62 @@ func (a *HostAgent) waitForRequirements(label string, requirements []requirement
 	return errors.Join(errs...)
 }
 
+// prefixExportParam will modify a script to be executed by ssh.ExecuteScript so that it exports
+// all the variables from /mnt/lima-cidata/param.env before invoking the actual interpreter.
+//
+//   - The script is executed in user mode, so needs to read the file using `sudo`.
+//
+//   - `sudo cat param.env | while …; do export …; done` does not work because the piping
+//     creates a subshell, and the exported variables are not visible to the parent process.
+//
+//   - The `<<<"$string"` redirection is not available on alpine-lima, where /bin/bash is
+//     just a wrapper around busybox ash.
+//
+// A script that will start with `#!/usr/bin/env ruby` will be modified to look like this:
+//
+//	while read -r line; do
+//	    [ -n "$line" ] && export "$line"
+//	done<<EOF
+//	$(sudo cat /mnt/lima-cidata/param.env)
+//	EOF
+//	/usr/bin/env ruby
+//
+// ssh.ExecuteScript will strip the `#!` prefix from the first line and invoke the
+// rest of the line as the command. The full script is then passed via STDIN. We use
+// "$(printf '…')" to be able to use \n as newline escapes, to fit everything on a
+// single line:
+//
+//	#!/bin/bash -c "$(printf 'while … done<<EOF\n$(sudo …)\nEOF\n/usr/bin/env ruby')"
+//	#!/usr/bin/env ruby
+//	…
+//
+// An earlier implementation used $'…' for quoting, but that isn't supported if the
+// user switched the default shell to fish.
+func prefixExportParam(script string) (string, error) {
+	interpreter, err := ssh.ParseScriptInterpreter(script)
+	if err != nil {
+		return "", err
+	}
+
+	// TODO we should have a symbolic constant for `/mnt/lima-cidata`
+	exportParam := `while read -r line; do [ -n "$line" ] && export "$line"; done<<EOF\n$(sudo cat /mnt/lima-cidata/param.env)\nEOF\n`
+
+	// double up all '%' characters so we can pass them through unchanged in the format string of printf
+	interpreter = strings.ReplaceAll(interpreter, "%", "%%")
+	exportParam = strings.ReplaceAll(exportParam, "%", "%%")
+	// strings will be interpolated into single-quoted strings, so protect any existing single quotes
+	interpreter = strings.ReplaceAll(interpreter, "'", `'"'"'`)
+	exportParam = strings.ReplaceAll(exportParam, "'", `'"'"'`)
+	return fmt.Sprintf("#!/bin/bash -c \"$(printf '%s%s')\"\n%s", exportParam, interpreter, script), nil
+}
+
 func (a *HostAgent) waitForRequirement(r requirement) error {
 	logrus.Debugf("executing script %q", r.description)
-	stdout, stderr, err := ssh.ExecuteScript(a.instSSHAddress, a.sshLocalPort, a.sshConfig, r.script, r.description)
+	script, err := prefixExportParam(r.script)
+	if err != nil {
+		return err
+	}
+	stdout, stderr, err := ssh.ExecuteScript(a.instSSHAddress, a.sshLocalPort, a.sshConfig, script, r.description)
 	logrus.Debugf("stdout=%q, stderr=%q, err=%v", stdout, stderr, err)
 	if err != nil {
 		return fmt.Errorf("stdout=%q, stderr=%q: %w", stdout, stderr, err)
@@ -71,7 +125,7 @@ Make sure that the YAML field "ssh.localPort" is not used by other processes on 
 If any private key under ~/.ssh is protected with a passphrase, you need to have ssh-agent to be running.
 `,
 		})
-	if *a.y.Plain {
+	if *a.instConfig.Plain {
 		return req
 	}
 	req = append(req,
@@ -91,7 +145,7 @@ it must not be created until the session reset is done.
 `,
 		})
 
-	if *a.y.MountType == limayaml.REVSSHFS && len(a.y.Mounts) > 0 {
+	if *a.instConfig.MountType == limayaml.REVSSHFS && len(a.instConfig.Mounts) > 0 {
 		req = append(req, requirement{
 			description: "sshfs binary to be installed",
 			script: `#!/bin/bash
@@ -108,10 +162,10 @@ A possible workaround is to run "apt-get install sshfs" in the guest.
 `,
 		})
 		req = append(req, requirement{
-			description: "/etc/fuse.conf (/etc/fuse3.conf) to contain \"user_allow_other\"",
+			description: "fuse to \"allow_other\" as user",
 			script: `#!/bin/bash
 set -eux -o pipefail
-if ! timeout 30s bash -c "until grep -q ^user_allow_other /etc/fuse*.conf; do sleep 3; done"; then
+if ! timeout 30s bash -c "until sudo grep -q ^user_allow_other /etc/fuse*.conf; do sleep 3; done"; then
 	echo >&2 "/etc/fuse.conf (/etc/fuse3.conf) is not updated to contain \"user_allow_other\""
 	exit 1
 fi
@@ -124,7 +178,7 @@ fi
 
 func (a *HostAgent) optionalRequirements() []requirement {
 	req := make([]requirement, 0)
-	if (*a.y.Containerd.System || *a.y.Containerd.User) && !*a.y.Plain {
+	if (*a.instConfig.Containerd.System || *a.instConfig.Containerd.User) && !*a.instConfig.Plain {
 		req = append(req,
 			requirement{
 				description: "systemd must be available",
@@ -146,7 +200,7 @@ are set to 'false' in the config file.
 				description: "containerd binaries to be installed",
 				script: `#!/bin/bash
 set -eux -o pipefail
-if ! timeout 30s bash -c "until command -v nerdctl || test -x ` + *a.y.GuestInstallPrefix + `/bin/nerdctl; do sleep 3; done"; then
+if ! timeout 30s bash -c "until command -v nerdctl || test -x ` + *a.instConfig.GuestInstallPrefix + `/bin/nerdctl; do sleep 3; done"; then
 	echo >&2 "nerdctl is not installed yet"
 	exit 1
 fi
@@ -157,7 +211,7 @@ Also see "/var/log/cloud-init-output.log" in the guest.
 `,
 			})
 	}
-	for _, probe := range a.y.Probes {
+	for _, probe := range a.instConfig.Probes {
 		if probe.Mode == limayaml.ProbeModeReadiness {
 			req = append(req, requirement{
 				description: probe.Description,

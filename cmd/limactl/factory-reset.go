@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/lima-vm/lima/pkg/cidata"
+	"github.com/lima-vm/lima/pkg/instance"
 	"github.com/lima-vm/lima/pkg/store"
 	"github.com/lima-vm/lima/pkg/store/filenames"
 	"github.com/sirupsen/logrus"
@@ -19,6 +21,7 @@ func newFactoryResetCommand() *cobra.Command {
 		Args:              WrapArgsError(cobra.MaximumNArgs(1)),
 		RunE:              factoryResetAction,
 		ValidArgsFunction: factoryResetBashComplete,
+		GroupID:           advancedCommand,
 	}
 	return resetCommand
 }
@@ -37,22 +40,35 @@ func factoryResetAction(_ *cobra.Command, args []string) error {
 		}
 		return err
 	}
+	if inst.Protected {
+		return errors.New("instance is protected to prohibit accidental factory-reset (Hint: use `limactl unprotect`)")
+	}
 
-	stopInstanceForcibly(inst)
+	instance.StopForcibly(inst)
 
 	fi, err := os.ReadDir(inst.Dir)
 	if err != nil {
 		return err
 	}
+	retain := map[string]struct{}{
+		filenames.LimaVersion:  {},
+		filenames.Protected:    {},
+		filenames.VzIdentifier: {},
+	}
 	for _, f := range fi {
 		path := filepath.Join(inst.Dir, f.Name())
-		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") && f.Name() != filenames.VzIdentifier {
+		if _, ok := retain[f.Name()]; !ok && !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
 			logrus.Infof("Removing %q", path)
 			if err := os.Remove(path); err != nil {
 				logrus.Error(err)
 			}
 		}
 	}
+	// Regenerate the cloud-config.yaml, to reflect any changes to the global _config
+	if err := cidata.GenerateCloudConfig(inst.Dir, instName, inst.Config); err != nil {
+		logrus.Error(err)
+	}
+
 	logrus.Infof("Instance %q has been factory reset", instName)
 	return nil
 }

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/coreos/go-semver/semver"
-	"github.com/lima-vm/lima/pkg/osutil"
 	"github.com/lima-vm/lima/pkg/sshutil"
 	"github.com/lima-vm/lima/pkg/store"
 	"github.com/sirupsen/logrus"
@@ -30,9 +29,11 @@ func newCopyCommand() *cobra.Command {
 		Long:    copyHelp,
 		Args:    WrapArgsError(cobra.MinimumNArgs(2)),
 		RunE:    copyAction,
+		GroupID: advancedCommand,
 	}
 
 	copyCommand.Flags().BoolP("recursive", "r", false, "copy directories recursively")
+	copyCommand.Flags().BoolP("verbose", "v", false, "enable verbose output")
 
 	return copyCommand
 }
@@ -43,31 +44,38 @@ func copyAction(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	verbose, err := cmd.Flags().GetBool("verbose")
+	if err != nil {
+		return err
+	}
+
 	arg0, err := exec.LookPath("scp")
 	if err != nil {
 		return err
 	}
-	u, err := osutil.LimaUser(false)
-	if err != nil {
-		return err
-	}
-	instDirs := make(map[string]string)
+	instances := make(map[string]*store.Instance)
 	scpFlags := []string{}
 	scpArgs := []string{}
 	debug, err := cmd.Flags().GetBool("debug")
 	if err != nil {
 		return err
 	}
+
 	if debug {
-		scpFlags = append(scpFlags, "-v")
+		verbose = true
 	}
+
+	if verbose {
+		scpFlags = append(scpFlags, "-v")
+	} else {
+		scpFlags = append(scpFlags, "-q")
+	}
+
 	if recursive {
 		scpFlags = append(scpFlags, "-r")
 	}
-	legacySSH := false
-	if sshutil.DetectOpenSSHVersion().LessThan(*semver.New("8.0.0")) {
-		legacySSH = true
-	}
+	// this assumes that ssh and scp come from the same place, but scp has no -V
+	legacySSH := sshutil.DetectOpenSSHVersion("ssh").LessThan(*semver.New("8.0.0"))
 	for _, arg := range args {
 		path := strings.Split(arg, ":")
 		switch len(path) {
@@ -87,35 +95,35 @@ func copyAction(cmd *cobra.Command, args []string) error {
 			}
 			if legacySSH {
 				scpFlags = append(scpFlags, "-P", fmt.Sprintf("%d", inst.SSHLocalPort))
-				scpArgs = append(scpArgs, fmt.Sprintf("%s@127.0.0.1:%s", u.Username, path[1]))
+				scpArgs = append(scpArgs, fmt.Sprintf("%s@127.0.0.1:%s", *inst.Config.User.Name, path[1]))
 			} else {
-				scpArgs = append(scpArgs, fmt.Sprintf("scp://%s@127.0.0.1:%d/%s", u.Username, inst.SSHLocalPort, path[1]))
+				scpArgs = append(scpArgs, fmt.Sprintf("scp://%s@127.0.0.1:%d/%s", *inst.Config.User.Name, inst.SSHLocalPort, path[1]))
 			}
-			instDirs[instName] = inst.Dir
+			instances[instName] = inst
 		default:
 			return fmt.Errorf("path %q contains multiple colons", arg)
 		}
 	}
-	if legacySSH && len(instDirs) > 1 {
-		return fmt.Errorf("More than one (instance) host is involved in this command, this is only supported for openSSH v8.0 or higher")
+	if legacySSH && len(instances) > 1 {
+		return errors.New("more than one (instance) host is involved in this command, this is only supported for openSSH v8.0 or higher")
 	}
 	scpFlags = append(scpFlags, "-3", "--")
 	scpArgs = append(scpFlags, scpArgs...)
 
 	var sshOpts []string
-	if len(instDirs) == 1 {
+	if len(instances) == 1 {
 		// Only one (instance) host is involved; we can use the instance-specific
 		// arguments such as ControlPath.  This is preferred as we can multiplex
 		// sessions without re-authenticating (MaxSessions permitting).
-		for _, instDir := range instDirs {
-			sshOpts, err = sshutil.SSHOpts(instDir, false, false, false, false)
+		for _, inst := range instances {
+			sshOpts, err = sshutil.SSHOpts("ssh", inst.Dir, *inst.Config.User.Name, false, false, false, false)
 			if err != nil {
 				return err
 			}
 		}
 	} else {
 		// Copying among multiple hosts; we can't pass in host-specific options.
-		sshOpts, err = sshutil.CommonOpts(false)
+		sshOpts, err = sshutil.CommonOpts("ssh", false)
 		if err != nil {
 			return err
 		}
@@ -126,7 +134,7 @@ func copyAction(cmd *cobra.Command, args []string) error {
 	sshCmd.Stdin = cmd.InOrStdin()
 	sshCmd.Stdout = cmd.OutOrStdout()
 	sshCmd.Stderr = cmd.ErrOrStderr()
-	logrus.Debugf("executing scp (may take a long time)): %+v", sshCmd.Args)
+	logrus.Debugf("executing scp (may take a long time): %+v", sshCmd.Args)
 
 	// TODO: use syscall.Exec directly (results in losing tty?)
 	return sshCmd.Run()

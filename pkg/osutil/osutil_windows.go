@@ -1,8 +1,10 @@
 package osutil
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -33,6 +35,21 @@ func SysKill(pid int, _ Signal) error {
 	return windows.GenerateConsoleCtrlEvent(syscall.CTRL_BREAK_EVENT, uint32(pid))
 }
 
-func Ftruncate(_ int, _ int64) (err error) {
+func Dup2(oldfd int, newfd syscall.Handle) (err error) {
 	return fmt.Errorf("unimplemented")
+}
+
+func SignalName(sig os.Signal) string {
+	switch sig {
+	case syscall.SIGINT:
+		return "SIGINT"
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	default:
+		return fmt.Sprintf("Signal(%d)", sig)
+	}
+}
+
+func Sysctl(name string) (string, error) {
+	return "", errors.New("sysctl: unimplemented on Windows")
 }

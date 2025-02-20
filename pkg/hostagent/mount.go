@@ -20,7 +20,7 @@ func (a *HostAgent) setupMounts() ([]*mount, error) {
 		res  []*mount
 		errs []error
 	)
-	for _, f := range a.y.Mounts {
+	for _, f := range a.instConfig.Mounts {
 		m, err := a.setupMount(f)
 		if err != nil {
 			errs = append(errs, err)
@@ -37,7 +37,7 @@ func (a *HostAgent) setupMount(m limayaml.Mount) (*mount, error) {
 		return nil, err
 	}
 
-	mountPoint, err := localpathutil.Expand(m.MountPoint)
+	mountPoint, err := localpathutil.Expand(*m.MountPoint)
 	if err != nil {
 		return nil, err
 	}
@@ -47,10 +47,10 @@ func (a *HostAgent) setupMount(m limayaml.Mount) (*mount, error) {
 	// NOTE: allow_other requires "user_allow_other" in /etc/fuse.conf
 	sshfsOptions := "allow_other"
 	if !*m.SSHFS.Cache {
-		sshfsOptions = sshfsOptions + ",cache=no"
+		sshfsOptions += ",cache=no"
 	}
 	if *m.SSHFS.FollowSymlinks {
-		sshfsOptions = sshfsOptions + ",follow_symlinks"
+		sshfsOptions += ",follow_symlinks"
 	}
 	logrus.Infof("Mounting %q on %q", location, mountPoint)
 

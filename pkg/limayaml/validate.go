@@ -7,13 +7,19 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"unicode"
 
+	"github.com/containerd/containerd/identifiers"
+	"github.com/coreos/go-semver/semver"
 	"github.com/docker/go-units"
 	"github.com/lima-vm/lima/pkg/localpathutil"
 	"github.com/lima-vm/lima/pkg/networks"
 	"github.com/lima-vm/lima/pkg/osutil"
+	"github.com/lima-vm/lima/pkg/version"
+	"github.com/lima-vm/lima/pkg/version/versionutil"
 	"github.com/sirupsen/logrus"
 )
 
@@ -40,7 +46,24 @@ func validateFileObject(f File, fieldName string) error {
 	return nil
 }
 
-func Validate(y LimaYAML, warn bool) error {
+func Validate(y *LimaYAML, warn bool) error {
+	if y.MinimumLimaVersion != nil {
+		if _, err := versionutil.Parse(*y.MinimumLimaVersion); err != nil {
+			return fmt.Errorf("field `minimumLimaVersion` must be a semvar value, got %q: %w", *y.MinimumLimaVersion, err)
+		}
+		limaVersion, err := versionutil.Parse(version.Version)
+		if err != nil {
+			return fmt.Errorf("can't parse builtin Lima version %q: %w", version.Version, err)
+		}
+		if versionutil.GreaterThan(*y.MinimumLimaVersion, limaVersion.String()) {
+			return fmt.Errorf("template requires Lima version %q; this is only %q", *y.MinimumLimaVersion, limaVersion.String())
+		}
+	}
+	if y.VMOpts.QEMU.MinimumVersion != nil {
+		if _, err := semver.NewVersion(*y.VMOpts.QEMU.MinimumVersion); err != nil {
+			return fmt.Errorf("field `vmOpts.qemu.minimumVersion` must be a semvar value, got %q: %w", *y.VMOpts.QEMU.MinimumVersion, err)
+		}
+	}
 	switch *y.OS {
 	case LINUX:
 	default:
@@ -79,8 +102,6 @@ func Validate(y LimaYAML, warn bool) error {
 			if f.Kernel.Arch != f.Arch {
 				return fmt.Errorf("images[%d].kernel has unexpected architecture %q, must be %q", i, f.Kernel.Arch, f.Arch)
 			}
-		} else if f.Arch == RISCV64 {
-			return errors.New("riscv64 needs the kernel (e.g., \"uboot.elf\") to be specified")
 		}
 		if f.Initrd != nil {
 			if err := validateFileObject(*f.Initrd, fmt.Sprintf("images[%d].initrd", i)); err != nil {
@@ -116,12 +137,11 @@ func Validate(y LimaYAML, warn bool) error {
 		return fmt.Errorf("field `memory` has an invalid value: %w", err)
 	}
 
-	u, err := osutil.LimaUser(false)
-	if err != nil {
-		return fmt.Errorf("internal error (not an error of YAML): %w", err)
+	for i, disk := range y.AdditionalDisks {
+		if err := identifiers.Validate(disk.Name); err != nil {
+			return fmt.Errorf("field `additionalDisks[%d].name is invalid`: %w", i, err)
+		}
 	}
-	// reservedHome is the home directory defined in "cidata.iso:/user-data"
-	reservedHome := fmt.Sprintf("/home/%s.linux", u.Username)
 
 	for i, f := range y.Mounts {
 		if !filepath.IsAbs(f.Location) && !strings.HasPrefix(f.Location, "~") {
@@ -132,13 +152,6 @@ func Validate(y LimaYAML, warn bool) error {
 		if err != nil {
 			return fmt.Errorf("field `mounts[%d].location` refers to an unexpandable path: %q: %w", i, f.Location, err)
 		}
-		switch loc {
-		case "/", "/bin", "/dev", "/etc", "/home", "/opt", "/sbin", "/tmp", "/usr", "/var":
-			return fmt.Errorf("field `mounts[%d].location` must not be a system path such as /etc or /usr", i)
-		case reservedHome:
-			return fmt.Errorf("field `mounts[%d].location` is internally reserved", i)
-		}
-
 		st, err := os.Stat(loc)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -146,6 +159,14 @@ func Validate(y LimaYAML, warn bool) error {
 			}
 		} else if !st.IsDir() {
 			return fmt.Errorf("field `mounts[%d].location` refers to a non-directory path: %q: %w", i, f.Location, err)
+		}
+
+		switch *f.MountPoint {
+		case "/", "/bin", "/dev", "/etc", "/home", "/opt", "/sbin", "/tmp", "/usr", "/var":
+			return fmt.Errorf("field `mounts[%d].mountPoint` must not be a system path such as /etc or /usr", i)
+		// home directory defined in "cidata.iso:/user-data"
+		case *y.User.Home:
+			return fmt.Errorf("field `mounts[%d].mountPoint` is the reserved internal home directory %q", i, *y.User.Home)
 		}
 
 		if _, err := units.RAMInBytes(*f.NineP.Msize); err != nil {
@@ -163,6 +184,12 @@ func Validate(y LimaYAML, warn bool) error {
 	case REVSSHFS, NINEP, VIRTIOFS, WSLMount:
 	default:
 		return fmt.Errorf("field `mountType` must be %q or %q or %q, or %q, got %q", REVSSHFS, NINEP, VIRTIOFS, WSLMount, *y.MountType)
+	}
+
+	for _, f := range y.MountTypesUnsupported {
+		if f == *y.MountType {
+			return fmt.Errorf("field `mountType` must not be one of %v (`mountTypesUnsupported`), got %q", y.MountTypesUnsupported, *y.MountType)
+		}
 	}
 
 	if warn && runtime.GOOS != "linux" {
@@ -183,21 +210,46 @@ func Validate(y LimaYAML, warn bool) error {
 					i, ProvisionModeDependency)
 			}
 		case ProvisionModeDependency:
+		case ProvisionModeAnsible:
 		default:
-			return fmt.Errorf("field `provision[%d].mode` must one of %q, %q, %q, or %q",
-				i, ProvisionModeSystem, ProvisionModeUser, ProvisionModeBoot, ProvisionModeDependency)
+			return fmt.Errorf("field `provision[%d].mode` must one of %q, %q, %q, %q, or %q",
+				i, ProvisionModeSystem, ProvisionModeUser, ProvisionModeBoot, ProvisionModeDependency, ProvisionModeAnsible)
+		}
+		if p.Playbook != "" {
+			if p.Mode != ProvisionModeAnsible {
+				return fmt.Errorf("field `provision[%d].mode must be %q if playbook is set", i, ProvisionModeAnsible)
+			}
+			if p.Script != "" {
+				return fmt.Errorf("field `provision[%d].script must be empty if playbook is set", i)
+			}
+			playbook := p.Playbook
+			if _, err := os.Stat(playbook); err != nil {
+				return fmt.Errorf("field `provision[%d].playbook` refers to an inaccessible path: %q: %w", i, playbook, err)
+			}
+		}
+		if strings.Contains(p.Script, "LIMA_CIDATA") {
+			logrus.Warn("provisioning scripts should not reference the LIMA_CIDATA variables")
 		}
 	}
 	needsContainerdArchives := (y.Containerd.User != nil && *y.Containerd.User) || (y.Containerd.System != nil && *y.Containerd.System)
-	if needsContainerdArchives && len(y.Containerd.Archives) == 0 {
-		return fmt.Errorf("field `containerd.archives` must be provided")
+	if needsContainerdArchives {
+		if len(y.Containerd.Archives) == 0 {
+			return errors.New("field `containerd.archives` must be provided")
+		}
+		for i, f := range y.Containerd.Archives {
+			if err := validateFileObject(f, fmt.Sprintf("containerd.archives[%d]", i)); err != nil {
+				return err
+			}
+		}
 	}
 	for i, p := range y.Probes {
+		if !strings.HasPrefix(p.Script, "#!") {
+			return fmt.Errorf("field `probe[%d].script` must start with a '#!' line", i)
+		}
 		switch p.Mode {
 		case ProbeModeReadiness:
 		default:
-			return fmt.Errorf("field `probe[%d].mode` can only be %q",
-				i, ProbeModeReadiness)
+			return fmt.Errorf("field `probe[%d].mode` can only be %q", i, ProbeModeReadiness)
 		}
 	}
 	for i, rule := range y.PortForwards {
@@ -248,7 +300,7 @@ func Validate(y LimaYAML, warn bool) error {
 		}
 		if rule.GuestSocket != "" {
 			if !path.IsAbs(rule.GuestSocket) {
-				return fmt.Errorf("field `%s.guestSocket` must be an absolute path", field)
+				return fmt.Errorf("field `%s.guestSocket` must be an absolute path, but is %q", field, rule.GuestSocket)
 			}
 			if rule.HostSocket == "" && rule.HostPortRange[1]-rule.HostPortRange[0] > 0 {
 				return fmt.Errorf("field `%s.guestSocket` can only be mapped to a single port or socket. not a range", field)
@@ -267,8 +319,10 @@ func Validate(y LimaYAML, warn bool) error {
 			return fmt.Errorf("field `%s.hostSocket` must be less than UNIX_PATH_MAX=%d characters, but is %d",
 				field, osutil.UnixPathMax, len(rule.HostSocket))
 		}
-		if rule.Proto != TCP {
-			return fmt.Errorf("field `%s.proto` must be %q", field, TCP)
+		switch rule.Proto {
+		case ProtoTCP, ProtoUDP, ProtoAny:
+		default:
+			return fmt.Errorf("field `%s.proto` must be %q, %q, or %q", field, ProtoTCP, ProtoUDP, ProtoAny)
 		}
 		if rule.Reverse && rule.GuestSocket == "" {
 			return fmt.Errorf("field `%s.reverse` must be %t", field, false)
@@ -283,7 +337,7 @@ func Validate(y LimaYAML, warn bool) error {
 		field := fmt.Sprintf("CopyToHost[%d]", i)
 		if rule.GuestFile != "" {
 			if !path.IsAbs(rule.GuestFile) {
-				return fmt.Errorf("field `%s.guest` must be an absolute path", field)
+				return fmt.Errorf("field `%s.guest` must be an absolute path, but is %q", field, rule.GuestFile)
 			}
 		}
 		if rule.HostFile != "" {
@@ -294,31 +348,47 @@ func Validate(y LimaYAML, warn bool) error {
 	}
 
 	if y.HostResolver.Enabled != nil && *y.HostResolver.Enabled && len(y.DNS) > 0 {
-		return fmt.Errorf("field `dns` must be empty when field `HostResolver.Enabled` is true")
+		return errors.New("field `dns` must be empty when field `HostResolver.Enabled` is true")
 	}
 
-	if err := validateNetwork(y, warn); err != nil {
+	if err := validateNetwork(y); err != nil {
 		return err
 	}
 	if warn {
 		warnExperimental(y)
 	}
+
+	// Validate Param settings
+	// Names must start with a letter, followed by any number of letters, digits, or underscores
+	validParamName := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
+	for param, value := range y.Param {
+		if !validParamName.MatchString(param) {
+			return fmt.Errorf("param %q name does not match regex %q", param, validParamName.String())
+		}
+		for _, r := range value {
+			if !unicode.IsPrint(r) && r != '\t' && r != ' ' {
+				return fmt.Errorf("param %q value contains unprintable character %q", param, r)
+			}
+		}
+	}
+
 	return nil
 }
 
-func validateNetwork(y LimaYAML, warn bool) error {
+func validateNetwork(y *LimaYAML) error {
 	interfaceName := make(map[string]int)
 	for i, nw := range y.Networks {
 		field := fmt.Sprintf("networks[%d]", i)
-		if nw.Lima != "" {
-			config, err := networks.Config()
+		switch {
+		case nw.Lima != "":
+			nwCfg, err := networks.LoadConfig()
 			if err != nil {
 				return err
 			}
-			if config.Check(nw.Lima) != nil {
+			if nwCfg.Check(nw.Lima) != nil {
 				return fmt.Errorf("field `%s.lima` references network %q which is not defined in networks.yaml", field, nw.Lima)
 			}
-			usernet, err := config.Usernet(nw.Lima)
+			usernet, err := nwCfg.Usernet(nw.Lima)
 			if err != nil {
 				return err
 			}
@@ -331,28 +401,16 @@ func validateNetwork(y LimaYAML, warn bool) error {
 			if nw.VZNAT != nil && *nw.VZNAT {
 				return fmt.Errorf("field `%s.lima` and field `%s.vzNAT` are mutually exclusive", field, field)
 			}
-			if nw.VNLDeprecated != "" {
-				return fmt.Errorf("field `%s.lima` and field `%s.vnl` are mutually exclusive", field, field)
-			}
-			if nw.SwitchPortDeprecated != 0 {
-				return fmt.Errorf("field `%s.switchPort` cannot be used with field `%s.lima`", field, field)
-			}
-		} else if nw.Socket != "" {
+		case nw.Socket != "":
 			if nw.VZNAT != nil && *nw.VZNAT {
 				return fmt.Errorf("field `%s.socket` and field `%s.vzNAT` are mutually exclusive", field, field)
-			}
-			if nw.VNLDeprecated != "" {
-				return fmt.Errorf("field `%s.socket` and field `%s.vnl` are mutually exclusive", field, field)
-			}
-			if nw.SwitchPortDeprecated != 0 {
-				return fmt.Errorf("field `%s.switchPort` cannot be used with field `%s.socket`", field, field)
 			}
 			if fi, err := os.Stat(nw.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			} else if err == nil && fi.Mode()&os.ModeSocket == 0 {
 				return fmt.Errorf("field `%s.socket` %q points to a non-socket file", field, nw.Socket)
 			}
-		} else if nw.VZNAT != nil && *nw.VZNAT {
+		case nw.VZNAT != nil && *nw.VZNAT:
 			if y.VMType == nil || *y.VMType != VZ {
 				return fmt.Errorf("field `%s.vzNAT` requires `vmType` to be %q", field, VZ)
 			}
@@ -362,54 +420,8 @@ func validateNetwork(y LimaYAML, warn bool) error {
 			if nw.Socket != "" {
 				return fmt.Errorf("field `%s.vzNAT` and field `%s.socket` are mutually exclusive", field, field)
 			}
-			if nw.VNLDeprecated != "" {
-				return fmt.Errorf("field `%s.vzNAT` and field `%s.vnl` are mutually exclusive", field, field)
-			}
-			if nw.SwitchPortDeprecated != 0 {
-				return fmt.Errorf("field `%s.switchPort` cannot be used with field `%s.vzNAT`", field, field)
-			}
-		} else {
-			if nw.VNLDeprecated == "" {
-				return fmt.Errorf("field `%s.lima`, field `%s.socket`, or field `%s.vnl` must be set", field, field, field)
-			}
-			// The field is called VDE.VNL in anticipation of QEMU upgrading VDE2 to VDEplug4,
-			// but right now the only valid value on macOS is a path to the vde_switch socket directory,
-			// optionally with vde:// prefix.
-			if !strings.Contains(nw.VNLDeprecated, "://") || strings.HasPrefix(nw.VNLDeprecated, "vde://") {
-				vdeSwitch := strings.TrimPrefix(nw.VNLDeprecated, "vde://")
-				if fi, err := os.Stat(vdeSwitch); err != nil {
-					// negligible when the instance is stopped
-					logrus.WithError(err).Debugf("field `%s.vnl` %q failed stat", field, vdeSwitch)
-				} else {
-					if fi.IsDir() {
-						/* Switch mode (vdeSwitch is dir, port != 65535) */
-						ctlSocket := filepath.Join(vdeSwitch, "ctl")
-						// ErrNotExist during os.Stat(ctlSocket) can be ignored. ctlSocket does not need to exist until actually starting the VM
-						if fi, err = os.Stat(ctlSocket); err == nil {
-							if fi.Mode()&os.ModeSocket == 0 {
-								return fmt.Errorf("field `%s.vnl` file %q is not a UNIX socket", field, ctlSocket)
-							}
-						}
-						if nw.SwitchPortDeprecated == 65535 {
-							return fmt.Errorf("field `%s.vnl` points to a non-PTP switch, so the port number must not be 65535", field)
-						}
-					} else {
-						/* PTP mode (vdeSwitch is socket, port == 65535) */
-						if fi.Mode()&os.ModeSocket == 0 {
-							return fmt.Errorf("field `%s.vnl` %q is not a directory nor a UNIX socket", field, vdeSwitch)
-						}
-						if nw.SwitchPortDeprecated != 65535 {
-							return fmt.Errorf("field `%s.vnl` points to a PTP (switchless) socket %q, so the port number has to be 65535 (got %d)",
-								field, vdeSwitch, nw.SwitchPortDeprecated)
-						}
-					}
-				}
-			} else if runtime.GOOS != "linux" {
-				if warn {
-					logrus.Warnf("field `%s.vnl` is unlikely to work for %s (unless libvdeplug4 has been ported to %s and is installed)",
-						field, runtime.GOOS, runtime.GOOS)
-				}
-			}
+		default:
+			return fmt.Errorf("field `%s.lima` or  field `%s.socket must be set", field, field)
 		}
 		if nw.MACAddress != "" {
 			hw, err := net.ParseMAC(nw.MACAddress)
@@ -438,6 +450,56 @@ func validateNetwork(y LimaYAML, warn bool) error {
 	return nil
 }
 
+// ValidateParamIsUsed checks if the keys in the `param` field are used in any script, probe, copyToHost, or portForward.
+// It should be called before the `y` parameter is passed to FillDefault() that execute template.
+func ValidateParamIsUsed(y *LimaYAML) error {
+	for key := range y.Param {
+		re, err := regexp.Compile(`{{[^}]*\.Param\.` + key + `[^}]*}}|\bPARAM_` + key + `\b`)
+		if err != nil {
+			return fmt.Errorf("field to compile regexp for key %q: %w", key, err)
+		}
+		keyIsUsed := false
+		for _, p := range y.Provision {
+			if re.MatchString(p.Script) {
+				keyIsUsed = true
+				break
+			}
+		}
+		for _, p := range y.Probes {
+			if re.MatchString(p.Script) {
+				keyIsUsed = true
+				break
+			}
+		}
+		for _, p := range y.CopyToHost {
+			if re.MatchString(p.GuestFile) || re.MatchString(p.HostFile) {
+				keyIsUsed = true
+				break
+			}
+		}
+		for _, p := range y.PortForwards {
+			if re.MatchString(p.GuestSocket) || re.MatchString(p.HostSocket) {
+				keyIsUsed = true
+				break
+			}
+		}
+		for _, p := range y.Mounts {
+			if re.MatchString(p.Location) {
+				keyIsUsed = true
+				break
+			}
+			if p.MountPoint != nil && re.MatchString(*p.MountPoint) {
+				keyIsUsed = true
+				break
+			}
+		}
+		if !keyIsUsed {
+			return fmt.Errorf("field `param` key %q is not used in any provision, probe, copyToHost, or portForward", key)
+		}
+	}
+	return nil
+}
+
 func validatePort(field string, port int) error {
 	switch {
 	case port < 0:
@@ -452,15 +514,9 @@ func validatePort(field string, port int) error {
 	return nil
 }
 
-func warnExperimental(y LimaYAML) {
-	if *y.MountType == NINEP {
-		logrus.Warn("`mountType: 9p` is experimental")
-	}
+func warnExperimental(y *LimaYAML) {
 	if *y.MountType == VIRTIOFS && runtime.GOOS == "linux" {
 		logrus.Warn("`mountType: virtiofs` on Linux is experimental")
-	}
-	if *y.VMType == VZ {
-		logrus.Warn("`vmType: vz` is experimental")
 	}
 	if *y.Arch == RISCV64 {
 		logrus.Warn("`arch: riscv64` is experimental")
@@ -470,5 +526,8 @@ func warnExperimental(y LimaYAML) {
 	}
 	if y.Audio.Device != nil && *y.Audio.Device != "" {
 		logrus.Warn("`audio.device` is experimental")
+	}
+	if y.MountInotify != nil && *y.MountInotify {
+		logrus.Warn("`mountInotify` is experimental")
 	}
 }

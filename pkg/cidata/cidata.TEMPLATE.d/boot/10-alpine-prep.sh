@@ -19,11 +19,18 @@ for REPO in main community; do
 	fi
 done
 
+# Alpine comes with doas instead of sudo
+if ! command -v sudo >/dev/null 2>&1; then
+	apk add sudo
+fi
+
 # Alpine doesn't use PAM so we need to explicitly allow public key auth
 usermod -p '*' "${LIMA_CIDATA_USER}"
 
 # Alpine disables TCP forwarding, which is needed by the lima-guestagent
 sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
+# Enable PAM so as to load /etc/environment via pam_env
+sed -i 's/#UsePAM no/UsePAM yes/g' /etc/ssh/sshd_config
 rc-service --ifstarted sshd reload
 
 # mount /sys/fs/cgroup

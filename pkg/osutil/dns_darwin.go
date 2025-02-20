@@ -14,20 +14,18 @@ func DNSAddresses() ([]string, error) {
 		return nil, err
 	}
 	var addresses []string
-	if len(nwData) > 0 {
-		// Return DNS addresses from the first interface that has an IPv4 address.
-		// The networks are in service order already.
-		for _, nw := range nwData {
-			if len(nw.IPv4.Addresses) > 0 {
-				addresses = nw.DNS.ServerAddresses
-				break
-			}
+	// Return DNS addresses from the first interface that has an IPv4 address.
+	// The networks are in service order already.
+	for _, nw := range nwData {
+		if len(nw.IPv4.Addresses) > 0 {
+			addresses = nw.DNS.ServerAddresses
+			break
 		}
 	}
 	return addresses, nil
 }
 
-func proxyURL(proxy string, port interface{}) string {
+func proxyURL(proxy string, port any) string {
 	if strings.Contains(proxy, "://") {
 		if portNumber, ok := port.(float64); ok && portNumber != 0 {
 			proxy = fmt.Sprintf("%s:%.0f", proxy, portNumber)

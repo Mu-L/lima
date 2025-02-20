@@ -4,6 +4,18 @@ set -eux
 # This script does not work unless systemd is available
 command -v systemctl >/dev/null 2>&1 || exit 0
 
+if [ -O "${LIMA_CIDATA_HOME}" ]; then
+	# Fix ownership of the user home directory when created by root.
+	# In cases where mount points exist in the user's home directory, the home directory and
+	# the mount points are created by root before the user is created. This leads to the home
+	# directory being owned by root.
+	# Following commands fix the ownership of the home directory and its contents (on the same filesystem)
+	# is updated to the correct user.
+	# shellcheck disable=SC2046 # it fails if find results are quoted.
+	chown "${LIMA_CIDATA_USER}" $(find "${LIMA_CIDATA_HOME}" -xdev) ||
+		true # Ignore errors because changing owner of the mount points may fail but it is not critical.
+fi
+
 # Set up env
 for f in .profile .bashrc .zshrc; do
 	if ! grep -q "# Lima BEGIN" "${LIMA_CIDATA_HOME}/$f"; then
@@ -51,7 +63,11 @@ fi
 
 # Set up subuid
 for f in /etc/subuid /etc/subgid; do
-	grep -qw "${LIMA_CIDATA_USER}" $f || echo "${LIMA_CIDATA_USER}:100000:65536" >>$f
+	# systemd-homed expects the subuid range to be within 524288-1878982656 (0x80000-0x6fff0000).
+	# See userdbctl.
+	# 1073741824 (1G) is just an arbitrary number.
+	# 1073741825-1878982656 is left blank for additional accounts.
+	grep -qw "${LIMA_CIDATA_USER}" $f || echo "${LIMA_CIDATA_USER}:524288:1073741824" >>$f
 done
 
 # Start systemd session

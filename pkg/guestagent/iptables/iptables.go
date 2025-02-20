@@ -67,15 +67,13 @@ func parsePortsFromRules(rules []string) ([]Entry, error) {
 	for _, rule := range rules {
 		if found := findPortRegex.FindStringSubmatch(rule); found != nil {
 			if len(found) == 4 {
-				port, err := strconv.Atoi(found[3])
+				port64, err := strconv.ParseInt(found[3], 10, 32)
 				if err != nil {
 					return nil, err
 				}
+				port := int(port64)
 
-				istcp := false
-				if found[2] == "tcp" {
-					istcp = true
-				}
+				istcp := found[2] == "tcp"
 
 				// When no IP is present the rule applies to all interfaces.
 				ip := found[1]

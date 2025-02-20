@@ -18,10 +18,13 @@ import (
 
 	"github.com/docker/go-units"
 	hostagentclient "github.com/lima-vm/lima/pkg/hostagent/api/client"
+	"github.com/lima-vm/lima/pkg/identifierutil"
 	"github.com/lima-vm/lima/pkg/limayaml"
 	"github.com/lima-vm/lima/pkg/store/dirnames"
 	"github.com/lima-vm/lima/pkg/store/filenames"
 	"github.com/lima-vm/lima/pkg/textutil"
+	"github.com/lima-vm/lima/pkg/version/versionutil"
+	"github.com/sirupsen/logrus"
 )
 
 type Status = string
@@ -36,7 +39,9 @@ const (
 )
 
 type Instance struct {
-	Name            string             `json:"name"`
+	Name string `json:"name"`
+	// Hostname, not HostName (corresponds to SSH's naming convention)
+	Hostname        string             `json:"hostname"`
 	Status          Status             `json:"status"`
 	Dir             string             `json:"dir"`
 	VMType          limayaml.VMType    `json:"vmType"`
@@ -56,22 +61,18 @@ type Instance struct {
 	Config          *limayaml.LimaYAML `json:"config,omitempty"`
 	SSHAddress      string             `json:"sshAddress,omitempty"`
 	Protected       bool               `json:"protected"`
-}
-
-func (inst *Instance) LoadYAML() (*limayaml.LimaYAML, error) {
-	if inst.Dir == "" {
-		return nil, errors.New("inst.Dir is empty")
-	}
-	yamlPath := filepath.Join(inst.Dir, filenames.LimaYAML)
-	return LoadYAMLByFilePath(yamlPath)
+	LimaVersion     string             `json:"limaVersion"`
+	Param           map[string]string  `json:"param,omitempty"`
 }
 
 // Inspect returns err only when the instance does not exist (os.ErrNotExist).
-// Other errors are returned as *Instance.Errors
+// Other errors are returned as *Instance.Errors.
 func Inspect(instName string) (*Instance, error) {
 	inst := &Instance{
-		Name:   instName,
-		Status: StatusUnknown,
+		Name: instName,
+		// TODO: support customizing hostname
+		Hostname: identifierutil.HostnameFromInstName(instName),
+		Status:   StatusUnknown,
 	}
 	// InstanceDir validates the instName but does not check whether the instance exists
 	instDir, err := InstanceDir(instName)
@@ -167,6 +168,17 @@ func Inspect(instName string) (*Instance, error) {
 			}
 		}
 	}
+
+	limaVersionFile := filepath.Join(instDir, filenames.LimaVersion)
+	if version, err := os.ReadFile(limaVersionFile); err == nil {
+		inst.LimaVersion = strings.TrimSpace(string(version))
+		if _, err = versionutil.Parse(inst.LimaVersion); err != nil {
+			logrus.Warnf("treating lima version %q from %q as very latest release", inst.LimaVersion, limaVersionFile)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		inst.Errors = append(inst.Errors, err)
+	}
+	inst.Param = y.Param
 	return inst, nil
 }
 
@@ -179,14 +191,15 @@ func inspectStatusWithPIDFiles(instDir string, inst *Instance, y *limayaml.LimaY
 	}
 
 	if inst.Status == StatusUnknown {
-		if inst.HostAgentPID > 0 && inst.DriverPID > 0 {
+		switch {
+		case inst.HostAgentPID > 0 && inst.DriverPID > 0:
 			inst.Status = StatusRunning
-		} else if inst.HostAgentPID == 0 && inst.DriverPID == 0 {
+		case inst.HostAgentPID == 0 && inst.DriverPID == 0:
 			inst.Status = StatusStopped
-		} else if inst.HostAgentPID > 0 && inst.DriverPID == 0 {
+		case inst.HostAgentPID > 0 && inst.DriverPID == 0:
 			inst.Errors = append(inst.Errors, errors.New("host agent is running but driver is not"))
 			inst.Status = StatusBroken
-		} else {
+		default:
 			inst.Errors = append(inst.Errors, fmt.Errorf("%s driver is running but host agent is not", inst.VMType))
 			inst.Status = StatusBroken
 		}
@@ -270,7 +283,7 @@ type PrintOptions struct {
 }
 
 // PrintInstances prints instances in a requested format to a given io.Writer.
-// Supported formats are "json", "yaml", "table", or a go template
+// Supported formats are "json", "yaml", "table", or a go template.
 func PrintInstances(w io.Writer, instances []*Instance, format string, options *PrintOptions) error {
 	switch format {
 	case "json":

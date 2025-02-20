@@ -2,17 +2,16 @@ package driver
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"net"
 
-	"github.com/lima-vm/lima/pkg/limayaml"
 	"github.com/lima-vm/lima/pkg/store"
 )
 
 // Driver interface is used by hostagent for managing vm.
 //
 // This interface is extended by BaseDriver which provides default implementation.
-// All other driver definition must extend BaseDriver
+// All other driver definition must extend BaseDriver.
 type Driver interface {
 	// Validate returns error if the current driver isn't support for given config
 	Validate() error
@@ -26,7 +25,7 @@ type Driver interface {
 	Initialize(_ context.Context) error
 
 	// CreateDisk returns error if the current driver fails in creating disk
-	CreateDisk() error
+	CreateDisk(_ context.Context) error
 
 	// Start is used for booting the vm using driver instance
 	// It returns a chan error on successful boot
@@ -64,15 +63,19 @@ type Driver interface {
 
 	ListSnapshots(_ context.Context) (string, error)
 
+	// ForwardGuestAgent returns if the guest agent sock needs forwarding by host agent.
+	ForwardGuestAgent() bool
+
+	// GuestAgentConn returns the guest agent connection, or nil (if forwarded by ssh).
 	GuestAgentConn(_ context.Context) (net.Conn, error)
 }
 
 type BaseDriver struct {
 	Instance *store.Instance
-	Yaml     *limayaml.LimaYAML
 
 	SSHLocalPort int
 	VSockPort    int
+	VirtioPort   string
 }
 
 var _ Driver = (*BaseDriver)(nil)
@@ -85,7 +88,7 @@ func (d *BaseDriver) Initialize(_ context.Context) error {
 	return nil
 }
 
-func (d *BaseDriver) CreateDisk() error {
+func (d *BaseDriver) CreateDisk(_ context.Context) error {
 	return nil
 }
 
@@ -122,21 +125,27 @@ func (d *BaseDriver) GetDisplayConnection(_ context.Context) (string, error) {
 }
 
 func (d *BaseDriver) CreateSnapshot(_ context.Context, _ string) error {
-	return fmt.Errorf("unimplemented")
+	return errors.New("unimplemented")
 }
 
 func (d *BaseDriver) ApplySnapshot(_ context.Context, _ string) error {
-	return fmt.Errorf("unimplemented")
+	return errors.New("unimplemented")
 }
 
 func (d *BaseDriver) DeleteSnapshot(_ context.Context, _ string) error {
-	return fmt.Errorf("unimplemented")
+	return errors.New("unimplemented")
 }
 
 func (d *BaseDriver) ListSnapshots(_ context.Context) (string, error) {
-	return "", fmt.Errorf("unimplemented")
+	return "", errors.New("unimplemented")
+}
+
+func (d *BaseDriver) ForwardGuestAgent() bool {
+	// if driver is not providing, use host agent
+	return d.VSockPort == 0 && d.VirtioPort == ""
 }
 
 func (d *BaseDriver) GuestAgentConn(_ context.Context) (net.Conn, error) {
-	return nil, fmt.Errorf("unimplemented")
+	// use the unix socket forwarded by host agent
+	return nil, nil
 }

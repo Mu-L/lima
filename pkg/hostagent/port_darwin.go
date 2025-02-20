@@ -10,13 +10,13 @@ import (
 	"strings"
 
 	"github.com/lima-vm/lima/pkg/bicopy"
-	"github.com/lima-vm/lima/pkg/guestagent/api"
+	"github.com/lima-vm/lima/pkg/portfwd"
 	"github.com/lima-vm/sshocker/pkg/ssh"
 	"github.com/sirupsen/logrus"
 )
 
-// forwardTCP is not thread-safe
-func forwardTCP(ctx context.Context, sshConfig *ssh.SSHConfig, port int, local, remote string, verb string) error {
+// forwardTCP is not thread-safe.
+func forwardTCP(ctx context.Context, sshConfig *ssh.SSHConfig, port int, local, remote, verb string) error {
 	if strings.HasPrefix(local, "/") {
 		return forwardSSH(ctx, sshConfig, port, local, remote, verb, false)
 	}
@@ -30,7 +30,7 @@ func forwardTCP(ctx context.Context, sshConfig *ssh.SSHConfig, port int, local, 
 		return err
 	}
 
-	if !localIP.Equal(api.IPv4loopback1) || localPort >= 1024 {
+	if !localIP.Equal(IPv4loopback1) || localPort >= 1024 {
 		return forwardSSH(ctx, sshConfig, port, local, remote, verb, false)
 	}
 
@@ -97,11 +97,12 @@ func newPseudoLoopbackForwarder(localPort int, unixSock string) (*pseudoLoopback
 		return nil, err
 	}
 
-	lnAddr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf("0.0.0.0:%d", localPort))
+	// use "tcp" network to listen on both "tcp4" and "tcp6"
+	lnAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("0.0.0.0:%d", localPort))
 	if err != nil {
 		return nil, err
 	}
-	ln, err := net.ListenTCP("tcp4", lnAddr)
+	ln, err := net.ListenTCP("tcp", lnAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +129,7 @@ func (plf *pseudoLoopbackForwarder) Serve() error {
 			ac.Close()
 			continue
 		}
-		if remoteAddrIP != "127.0.0.1" {
+		if !portfwd.IsLoopback(remoteAddrIP) {
 			logrus.WithError(err).Debugf("pseudoloopback forwarder: rejecting non-loopback remoteAddr %q", remoteAddr)
 			ac.Close()
 			continue
@@ -155,8 +156,4 @@ func (plf *pseudoLoopbackForwarder) forward(ac *net.TCPConn) error {
 func (plf *pseudoLoopbackForwarder) Close() error {
 	_ = plf.ln.Close()
 	return plf.onClose()
-}
-
-func getFreeVSockPort() (int, error) {
-	return 0, nil
 }

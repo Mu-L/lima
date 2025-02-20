@@ -2,7 +2,7 @@ package networks
 
 import "net"
 
-type YAML struct {
+type Config struct {
 	Paths    Paths              `yaml:"paths"`
 	Group    string             `yaml:"group,omitempty"` // default: "everyone"
 	Networks map[string]Network `yaml:"networks"`
@@ -10,8 +10,6 @@ type YAML struct {
 
 type Paths struct {
 	SocketVMNet string `yaml:"socketVMNet"`
-	VDESwitch   string `yaml:"vdeSwitch"` // Deprecated
-	VDEVMNet    string `yaml:"vdeVMNet"`  // Deprecated
 	VarRun      string `yaml:"varRun"`
 	Sudoers     string `yaml:"sudoers,omitempty"`
 }

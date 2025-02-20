@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -15,9 +16,10 @@ func newSnapshotCommand() *cobra.Command {
 	snapshotCmd := &cobra.Command{
 		Use:   "snapshot",
 		Short: "Manage instance snapshots",
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRun: func(*cobra.Command, []string) {
 			logrus.Warn("`limactl snapshot` is experimental")
 		},
+		GroupID: advancedCommand,
 	}
 	snapshotCmd.AddCommand(newSnapshotApplyCommand())
 	snapshotCmd.AddCommand(newSnapshotCreateCommand())
@@ -55,7 +57,7 @@ func snapshotCreateAction(cmd *cobra.Command, args []string) error {
 	}
 
 	if tag == "" {
-		return fmt.Errorf("expected tag")
+		return errors.New("expected tag")
 	}
 
 	ctx := cmd.Context()
@@ -90,7 +92,7 @@ func snapshotDeleteAction(cmd *cobra.Command, args []string) error {
 	}
 
 	if tag == "" {
-		return fmt.Errorf("expected tag")
+		return errors.New("expected tag")
 	}
 
 	ctx := cmd.Context()
@@ -125,7 +127,7 @@ func snapshotApplyAction(cmd *cobra.Command, args []string) error {
 	}
 
 	if tag == "" {
-		return fmt.Errorf("expected tag")
+		return errors.New("expected tag")
 	}
 
 	ctx := cmd.Context()
@@ -176,11 +178,11 @@ func snapshotListAction(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			tag := fields[1]
-			fmt.Printf("%s\n", tag)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", tag)
 		}
 		return nil
 	}
-	fmt.Print(out)
+	fmt.Fprint(cmd.OutOrStdout(), out)
 	return nil
 }
 

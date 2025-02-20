@@ -23,7 +23,7 @@ func startVM(ctx context.Context, distroName string) error {
 		"wsl.exe",
 		"--distribution",
 		distroName,
-	}, executil.WithContext(&ctx))
+	}, executil.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("failed to run `wsl.exe --distribution %s`: %w (out=%q)",
 			distroName, err, string(out))
@@ -41,7 +41,7 @@ func initVM(ctx context.Context, instanceDir, distroName string) error {
 		distroName,
 		instanceDir,
 		baseDisk,
-	}, executil.WithContext(&ctx))
+	}, executil.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("failed to run `wsl.exe --import %s %s %s`: %w (out=%q)",
 			distroName, instanceDir, baseDisk, err, string(out))
@@ -55,7 +55,7 @@ func stopVM(ctx context.Context, distroName string) error {
 		"wsl.exe",
 		"--terminate",
 		distroName,
-	}, executil.WithContext(&ctx))
+	}, executil.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("failed to run `wsl.exe --terminate %s`: %w (out=%q)",
 			distroName, err, string(out))
@@ -67,7 +67,7 @@ func stopVM(ctx context.Context, distroName string) error {
 var limaBoot string
 
 // provisionVM starts Lima's boot process inside an already imported VM.
-func provisionVM(ctx context.Context, instanceDir, instanceName, distroName string, errCh *chan error) error {
+func provisionVM(ctx context.Context, instanceDir, instanceName, distroName string, errCh chan<- error) error {
 	ciDataPath := filepath.Join(instanceDir, filenames.CIDataISODir)
 	m := map[string]string{
 		"CIDataPath": ciDataPath,
@@ -81,6 +81,7 @@ func provisionVM(ctx context.Context, instanceDir, instanceName, distroName stri
 		return err
 	}
 	if _, err = limaBootFile.Write(limaBootB); err != nil {
+		limaBootFile.Close()
 		return err
 	}
 	limaBootFileWinPath := limaBootFile.Name()
@@ -119,7 +120,7 @@ func provisionVM(ctx context.Context, instanceDir, instanceName, distroName stri
 		os.RemoveAll(limaBootFileWinPath)
 		logrus.Debugf("%v: %q", cmd.Args, string(out))
 		if err != nil {
-			*errCh <- fmt.Errorf(
+			errCh <- fmt.Errorf(
 				"error running wslCommand that executes boot.sh (%v): %w, "+
 					"check /var/log/lima-init.log for more details (out=%q)", cmd.Args, err, string(out))
 		}
@@ -138,7 +139,7 @@ func provisionVM(ctx context.Context, instanceDir, instanceName, distroName stri
 }
 
 // keepAlive runs a background process which in order to keep the WSL2 VM running in the background after launch.
-func keepAlive(ctx context.Context, distroName string, errCh *chan error) {
+func keepAlive(ctx context.Context, distroName string, errCh chan<- error) {
 	keepAliveCmd := exec.CommandContext(
 		ctx,
 		"wsl.exe",
@@ -151,7 +152,7 @@ func keepAlive(ctx context.Context, distroName string, errCh *chan error) {
 
 	go func() {
 		if err := keepAliveCmd.Run(); err != nil {
-			*errCh <- fmt.Errorf(
+			errCh <- fmt.Errorf(
 				"error running wsl keepAlive command: %w", err)
 		}
 	}()
@@ -164,7 +165,7 @@ func unregisterVM(ctx context.Context, distroName string) error {
 		"wsl.exe",
 		"--unregister",
 		distroName,
-	}, executil.WithContext(&ctx))
+	}, executil.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("failed to run `wsl.exe --unregister %s`: %w (out=%q)",
 			distroName, err, string(out))
