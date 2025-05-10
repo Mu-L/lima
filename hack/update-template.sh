@@ -84,6 +84,7 @@ function limayaml_arch() {
 	arch=${arch/amd64/x86_64}
 	arch=${arch/arm64/aarch64}
 	arch=${arch/armhf/armv7l}
+	arch=${arch/ppc64el/ppc64le}
 	echo "${arch}"
 }
 
@@ -157,6 +158,8 @@ if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
 	. "${scriptdir}/update-template-centos-stream.sh"
 	# shellcheck source=./update-template-almalinux.sh
 	. "${scriptdir}/update-template-almalinux.sh"
+	# shellcheck source=./update-template-almalinux-kitten.sh
+	. "${scriptdir}/update-template-almalinux-kitten.sh"
 	# shellcheck source=./update-template-rocky.sh
 	. "${scriptdir}/update-template-rocky.sh"
 	# shellcheck source=./update-template-alpine.sh

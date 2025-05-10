@@ -6,8 +6,12 @@ package imgutil
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"strconv"
 
 	"github.com/sirupsen/logrus"
 )
@@ -20,6 +24,29 @@ type InfoChild struct {
 type InfoFormatSpecific struct {
 	Type string          `json:"type,omitempty"` // since QEMU 1.7
 	Data json.RawMessage `json:"data,omitempty"` // since QEMU 1.7
+}
+
+func CreateDisk(disk, format string, size int) error {
+	if _, err := os.Stat(disk); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		// disk already exists
+		return err
+	}
+
+	args := []string{"create", "-f", format, disk, strconv.Itoa(size)}
+	cmd := exec.Command("qemu-img", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to run %v: %q: %w", cmd.Args, string(out), err)
+	}
+	return nil
+}
+
+func ResizeDisk(disk, format string, size int) error {
+	args := []string{"resize", "-f", format, disk, strconv.Itoa(size)}
+	cmd := exec.Command("qemu-img", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to run %v: %q: %w", cmd.Args, string(out), err)
+	}
+	return nil
 }
 
 func (sp *InfoFormatSpecific) Qcow2() *InfoFormatSpecificDataQcow2 {

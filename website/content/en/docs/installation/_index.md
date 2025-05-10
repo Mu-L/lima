@@ -6,10 +6,11 @@ Supported host OS:
 - macOS (the latest version is recommended)
 - Linux
 - NetBSD (untested)
+- DragonFlyBSD (untested)
 - Windows (untested)
 
 Prerequisite:
-- QEMU 7.1 or later (Required, only if QEMU driver is used)
+- QEMU (Required, only if [QEMU]({{< ref "/docs/config/vmtype#qemu" >}}) driver is used)
 
 {{< tabpane text=true >}}
 
