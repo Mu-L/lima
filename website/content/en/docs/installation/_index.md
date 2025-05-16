@@ -6,10 +6,11 @@ Supported host OS:
 - macOS (the latest version is recommended)
 - Linux
 - NetBSD (untested)
+- DragonFlyBSD (untested)
 - Windows (untested)
 
 Prerequisite:
-- QEMU 7.1 or later (Required, only if QEMU driver is used)
+- QEMU (Required, only if [QEMU]({{< ref "/docs/config/vmtype#qemu" >}}) driver is used)
 
 {{< tabpane text=true >}}
 
@@ -45,6 +46,9 @@ and extract it under `/usr/local` (or somewhere else).
 ```bash
 VERSION=$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | jq -r .tag_name)
 curl -fsSL "https://github.com/lima-vm/lima/releases/download/${VERSION}/lima-${VERSION:1}-$(uname -s)-$(uname -m).tar.gz" | tar Cxzvm /usr/local
+
+# For Lima v1.1 onward
+curl -fsSL "https://github.com/lima-vm/lima/releases/download/${VERSION}/lima-additional-guestagents-${VERSION:1}-$(uname -s)-$(uname -m).tar.gz" | tar Cxzvm /usr/local
 ```
 {{% /tab %}}
 {{< /tabpane >}}

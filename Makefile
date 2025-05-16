@@ -104,6 +104,7 @@ help-targets:
 	@echo  '- templates                 : Copy templates'
 	@echo  '- template_experimentals    : Copy experimental templates to experimental/'
 	@echo  '- default_template          : Copy default.yaml template'
+	@echo  '- update-templates          : Update templates'
 	@echo
 	@echo  'Targets for files in _output/share/doc/lima:'
 	@echo  '- documentation             : Copy documentation to _output/share/doc/lima'
@@ -139,7 +140,7 @@ exe: _output/bin/limactl$(exe)
 
 .PHONY: minimal native
 minimal: clean limactl native-guestagent default_template
-native: clean limactl helpers native-guestagent templates
+native: clean limactl helpers native-guestagent templates template_experimentals
 
 ################################################################################
 # Kconfig
@@ -272,7 +273,7 @@ LINUX_GUESTAGENT_PATH_COMMON = _output/share/lima/lima-guestagent.Linux-
 # How to add architecture specific guestagent:
 # 1. Add the architecture to GUESTAGENT_ARCHS
 # 2. Add ENVS_$(*_GUESTAGENT_PATH_COMMON)<arch> to set GOOS, GOARCH, and other necessary environment variables
-LINUX_GUESTAGENT_ARCHS = aarch64 armv7l riscv64 s390x x86_64
+LINUX_GUESTAGENT_ARCHS = aarch64 armv7l ppc64le riscv64 s390x x86_64
 
 ifeq ($(CONFIG_GUESTAGENT_OS_LINUX),y)
 ALL_GUESTAGENTS_NOT_COMPRESSED += $(addprefix $(LINUX_GUESTAGENT_PATH_COMMON),$(LINUX_GUESTAGENT_ARCHS))
@@ -290,7 +291,7 @@ ALL_GUESTAGENTS = $(addsuffix $(gz),$(ALL_GUESTAGENTS_NOT_COMPRESSED))
 guestagent_path = $(foreach arch,$(2),$($(1)_GUESTAGENT_PATH_COMMON)$(arch)$(gz))
 
 ifeq ($(CONFIG_GUESTAGENT_OS_LINUX),y)
-NATIVE_GUESTAGENT_ARCH = $(shell uname -m | sed -e s/arm64/aarch64/)
+NATIVE_GUESTAGENT_ARCH = $(shell echo $(GOARCH) | sed -e s/arm64/aarch64/ -e s/arm/armv7l/ -e s/amd64/x86_64/)
 NATIVE_GUESTAGENT = $(call guestagent_path,LINUX,$(NATIVE_GUESTAGENT_ARCH))
 ADDITIONAL_GUESTAGENT_ARCHS = $(filter-out $(NATIVE_GUESTAGENT_ARCH),$(LINUX_GUESTAGENT_ARCHS))
 ADDITIONAL_GUESTAGENTS = $(call guestagent_path,LINUX,$(ADDITIONAL_GUESTAGENT_ARCHS))
@@ -320,6 +321,7 @@ additional-guestagents: $(ADDITIONAL_GUESTAGENTS)
 # environment variables for linx-guestagent. these variable are used for checking force build.
 ENVS_$(LINUX_GUESTAGENT_PATH_COMMON)aarch64 = CGO_ENABLED=0 GOOS=linux GOARCH=arm64
 ENVS_$(LINUX_GUESTAGENT_PATH_COMMON)armv7l = CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7
+ENVS_$(LINUX_GUESTAGENT_PATH_COMMON)ppc64le = CGO_ENABLED=0 GOOS=linux GOARCH=ppc64le
 ENVS_$(LINUX_GUESTAGENT_PATH_COMMON)riscv64 = CGO_ENABLED=0 GOOS=linux GOARCH=riscv64
 ENVS_$(LINUX_GUESTAGENT_PATH_COMMON)s390x = CGO_ENABLED=0 GOOS=linux GOARCH=s390x
 ENVS_$(LINUX_GUESTAGENT_PATH_COMMON)x86_64 = CGO_ENABLED=0 GOOS=linux GOARCH=amd64
@@ -352,6 +354,16 @@ _output/share/lima/templates/%: templates/%
 # $(1): target file
 # On Windows, always copy to ensure the target has the same file as the source.
 force_link = $(if $(filter windows,$(GOOS)),force,$(shell test ! -L $(1) && echo force))
+
+################################################################################
+# templates/_images
+
+# fedora-N.yaml should not be updated to refer to Fedora N+1 images
+TEMPLATES_TO_BE_UPDATED = $(filter-out $(wildcard templates/_images/fedora*.yaml),$(wildcard templates/_images/*.yaml))
+
+.PHONY: update-templates
+update-templates: $(TEMPLATES_TO_BE_UPDATED)
+	./hack/update-template.sh $^
 
 ################################################################################
 # _output/share/doc/lima
@@ -424,14 +436,15 @@ ifeq ($(native_compiling),true)
 	$< tmpl copy --embed-all templates/default.yaml $@
 endif
 
-schema-limayaml.json: _output/bin/limactl$(exe) default-template.yaml
+schema-limayaml.json: _output/bin/limactl$(exe) templates/default.yaml default-template.yaml
 ifeq ($(native_compiling),true)
-	$< generate-jsonschema --schemafile $@ default-template.yaml
+	# validate both the original template (with the "base" etc), and the embedded template
+	$< generate-jsonschema --schemafile $@ templates/default.yaml default-template.yaml
 endif
 
 .PHONY: check-jsonschema
-check-jsonschema: schema-limayaml.json default-template.yaml
-	check-jsonschema --schemafile schema-limayaml.json default-template.yaml
+check-jsonschema: schema-limayaml.json templates/default.yaml default-template.yaml
+	check-jsonschema --schemafile schema-limayaml.json templates/default.yaml default-template.yaml
 
 ################################################################################
 .PHONY: diagrams
@@ -497,6 +510,7 @@ generate:
 
 ################################################################################
 # _artifacts/lima-$(VERSION_TRIMMED)-$(ARTIFACT_OS)-$(ARTIFACT_UNAME_M)
+# _artifacts/lima-additional-guestagents-$(VERSION_TRIMMED)-$(ARTIFACT_OS)-$(ARTIFACT_UNAME_M)
 .PHONY: artifact
 
 # returns the capitalized string of $(1).
@@ -522,11 +536,13 @@ endif
 ARTIFACT_OS = $(call capitalize,$(GOOS))
 ARTIFACT_UNAME_M = $(call to_uname_m,$(GOARCH))
 ARTIFACT_PATH_COMMON = _artifacts/lima-$(VERSION_TRIMMED)-$(ARTIFACT_OS)-$(ARTIFACT_UNAME_M)
+ARTIFACT_ADDITIONAL_GUESTAGENTS_PATH_COMMON = _artifacts/lima-additional-guestagents-$(VERSION_TRIMMED)-$(ARTIFACT_OS)-$(ARTIFACT_UNAME_M)
 
-artifact: $(addprefix $(ARTIFACT_PATH_COMMON),$(ARTIFACT_FILE_EXTENSIONS))
+artifact: $(addprefix $(ARTIFACT_PATH_COMMON),$(ARTIFACT_FILE_EXTENSIONS)) \
+	$(addprefix $(ARTIFACT_ADDITIONAL_GUESTAGENTS_PATH_COMMON),$(ARTIFACT_FILE_EXTENSIONS))
 
 ARTIFACT_DES =  _output/bin/limactl$(exe) $(LIMA_DEPS) $(HELPERS_DEPS) \
-	$(ALL_GUESTAGENTS) \
+	$(NATIVE_GUESTAGENT) \
 	$(TEMPLATES) $(TEMPLATE_EXPERIMENTALS) \
 	$(DOCUMENTATION) _output/share/doc/lima/templates \
 	_output/share/man/man1/limactl.1
@@ -535,7 +551,16 @@ ARTIFACT_DES =  _output/bin/limactl$(exe) $(LIMA_DEPS) $(HELPERS_DEPS) \
 $(ARTIFACT_PATH_COMMON).tar.gz: $(ARTIFACT_DES) | _artifacts
 	$(TAR) -C _output/ --no-xattrs -czvf $@ ./
 
+$(ARTIFACT_ADDITIONAL_GUESTAGENTS_PATH_COMMON).tar.gz:
+	# FIXME: do not exec make from make
+	make clean additional-guestagents
+	$(TAR) -C _output/ --no-xattrs -czvf $@ ./
+
 $(ARTIFACT_PATH_COMMON).zip: $(ARTIFACT_DES) | _artifacts
+	cd _output && $(ZIP) -r ../$@ *
+
+$(ARTIFACT_ADDITIONAL_GUESTAGENTS_PATH_COMMON).zip:
+	make clean additional-guestagents
 	cd _output && $(ZIP) -r ../$@ *
 
 # generate manpages using native limactl.
@@ -569,7 +594,7 @@ artifact-%-arm64 artifact-%-aarch64 artifact-arm64 artifact-aarch64: GOARCH = ar
 
 # build cross arch binaries.
 artifact-%: $$(call generate_manpages_if_needed)
-	make artifact GOOS=$(GOOS) GOARCH=$(GOARCH)
+	make clean artifact GOOS=$(GOOS) GOARCH=$(GOARCH)
 
 .PHONY: artifacts-misc
 artifacts-misc: | _artifacts

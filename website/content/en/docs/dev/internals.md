@@ -107,6 +107,12 @@ When using `vmType: vz` (Virtualization.framework), on boot, any qcow2 (default)
 
 `ls` will also only show the full/virtual size of the disks. To see the allocated space, `du -h disk_path` or `qemu-img info disk_path` can be used instead. See [#1405](https://github.com/lima-vm/lima/pull/1405) for more details.
 
+## Templates directory (`${LIMA_HOME}/_templates`)
+
+The templates directory can store additional template files that can be referenced with the `template://` schema.
+
+If the template directory exists (and `$LIMA_TEMPLATES_PATH` is not set), then this directory will be searched before the `/usr/local/share/lima/templates` default directory that contains all the templates bundled with Lima itself.
+
 ## Lima cache directory (`~/Library/Caches/lima`)
 
 Currently hard-coded to `~/Library/Caches/lima` on macOS.
@@ -124,32 +130,6 @@ The directory contains the following files:
 - `<ALGO>.digest`: digest of the data, in OCI format.
    e.g., file name `sha256.digest`, with content `sha256:5ba3d476707d510fe3ca3928e9cda5d0b4ce527d42b343404c92d563f82ba967`
 
-## Environment variables
-
-- `$LIMA_HOME`: The "Lima home directory" (see above).
-  - Default : `~/.lima`
-
-- `$LIMA_INSTANCE`: `lima ...` is expanded to `limactl shell ${LIMA_INSTANCE} ...`.
-  - Default : `default`
-
-- `$LIMA_SHELL`: `lima ...` is expanded to `limactl shell --shell ${LIMA_SHELL} ...`.
-  - No default : will use the user's shell configured inside the instance
-
-- `$LIMA_TEMPLATES_PATH`: A list of directories to locate templates via
-  the `template://` schema.
-  - Default: the `/usr/local/share/lima/templates` directory.
-
-- `$LIMA_WORKDIR`: `lima ...` is expanded to `limactl shell --workdir ${LIMA_WORKDIR} ...`.
-  - No default : will attempt to use the current directory from the host
-
-- `$QEMU_SYSTEM_X86_64`: path of `qemu-system-x86_64`
-  - Default: `qemu-system-x86_64` in `$PATH`
-
-- `$QEMU_SYSTEM_AARCH64`: path of `qemu-system-aarch64`
-  - Default: `qemu-system-aarch64` in `$PATH`
-
-- `$QEMU_SYSTEM_ARM`: path of `qemu-system-arm`
-  - Default: `qemu-system-arm` in `$PATH`
 
 ## Ansible
 The instance directory contains an inventory file, that might be used with Ansible playbooks and commands.
