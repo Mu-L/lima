@@ -1,14 +1,15 @@
 images:
 # Try to use release-yyyyMMdd image if available. Note that release-yyyyMMdd will be removed after several months.
 
-- location: https://cloud.debian.org/images/cloud/bullseye/20250303-2040/debian-11-genericcloud-amd64-20250303-2040.qcow2
-  arch: x86_64
-  digest: sha512:3c08356d6860f987089c14b45953fb1f266d1b1b50dd086744925e2ed4113b804e848a8b1b46614febc48cde759f18e824b76bfb02618ed6b3d06ed15ea99283
-
-- location: https://cloud.debian.org/images/cloud/bullseye/20250303-2040/debian-11-genericcloud-arm64-20250303-2040.qcow2
-  arch: aarch64
-  digest: sha512:c1a1645cf37ce628a8734bb25dce09fcd0858865302635ce0ae88b2da23bb615da43d483984709d743cd6b6b45d56d88e9f6800f0b3110ba1b09c01b990342f3
-
+- location: "https://cloud.debian.org/images/cloud/bullseye/20250512-2110/debian-11-genericcloud-amd64-20250512-2110.qcow2"
+  arch: "x86_64"
+  digest: "sha512:c902c738e05c0a9d67284563996aaae82a27b7df5240f38620ef9a7bdcab82e82317fa2209861718e74952199400607b30d8bd5c4a5cf53823ce4f54deb5d895"
+- location: "https://cloud.debian.org/images/cloud/bullseye/20250512-2110/debian-11-genericcloud-arm64-20250512-2110.qcow2"
+  arch: "aarch64"
+  digest: "sha512:e79761b03da4928ce6251236a739d2ac33c183c0b7e8d5474ec7218c3e4296b11bb81f10d54973c67d49535500898bb9ca3a984ca96f0314a2d19face956021f"
+- location: "https://cloud.debian.org/images/cloud/bullseye/20250512-2110/debian-11-genericcloud-ppc64el-20250512-2110.qcow2"
+  arch: "ppc64le"
+  digest: "sha512:d0eb263160c14242b47a008d43295bb59d2ced056849000311d52e9b9fa820d13a8387234faf54bab4f43040d5b044e4bdc80e8fc5e55ba5e03a878356b4151a"
 # Fallback to the latest release image.
 # Hint: run `limactl prune` to invalidate the cache
 
@@ -17,6 +18,9 @@ images:
 
 - location: https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-arm64.qcow2
   arch: aarch64
+
+- location: https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-ppc64el.qcow2
+  arch: ppc64le
 
 mountTypesUnsupported: [9p]
 

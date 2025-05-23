@@ -12,18 +12,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"text/template"
 	"time"
 
-	"github.com/coreos/go-semver/semver"
+	"github.com/docker/go-units"
+	"github.com/lima-vm/go-qcow2reader"
 	"github.com/lima-vm/lima/pkg/driver"
 	"github.com/lima-vm/lima/pkg/driverutil"
 	"github.com/lima-vm/lima/pkg/executil"
+	"github.com/lima-vm/lima/pkg/nativeimgutil"
 	"github.com/lima-vm/lima/pkg/osutil"
-	"github.com/lima-vm/lima/pkg/qemu"
-	"github.com/lima-vm/lima/pkg/qemu/entitlementutil"
+	"github.com/lima-vm/lima/pkg/qemu/imgutil"
+	"github.com/lima-vm/lima/pkg/usrlocalsharelima"
 	"github.com/mattn/go-isatty"
 
 	"github.com/lima-vm/lima/pkg/downloader"
@@ -76,11 +77,20 @@ func ensureNerdctlArchiveCache(ctx context.Context, y *limayaml.LimaYAML, create
 
 type Prepared struct {
 	Driver              driver.Driver
+	GuestAgent          string
 	NerdctlArchiveCache string
 }
 
 // Prepare ensures the disk, the nerdctl archive, etc.
 func Prepare(ctx context.Context, inst *store.Instance) (*Prepared, error) {
+	var guestAgent string
+	if !*inst.Config.Plain {
+		var err error
+		guestAgent, err = usrlocalsharelima.GuestAgentBinary(*inst.Config.OS, *inst.Config.Arch)
+		if err != nil {
+			return nil, err
+		}
+	}
 	limaDriver := driverutil.CreateTargetDriverInstance(&driver.BaseDriver{
 		Instance: inst,
 	})
@@ -101,6 +111,12 @@ func Prepare(ctx context.Context, inst *store.Instance) (*Prepared, error) {
 	if err := limaDriver.CreateDisk(ctx); err != nil {
 		return nil, err
 	}
+
+	// Ensure diffDisk size matches the store
+	if err := prepareDiffDisk(inst); err != nil {
+		return nil, err
+	}
+
 	nerdctlArchiveCache, err := ensureNerdctlArchiveCache(ctx, inst.Config, created)
 	if err != nil {
 		return nil, err
@@ -108,6 +124,7 @@ func Prepare(ctx context.Context, inst *store.Instance) (*Prepared, error) {
 
 	return &Prepared{
 		Driver:              limaDriver,
+		GuestAgent:          guestAgent,
 		NerdctlArchiveCache: nerdctlArchiveCache,
 	}, nil
 }
@@ -133,25 +150,6 @@ func Start(ctx context.Context, inst *store.Instance, limactl string, launchHost
 	logrus.Infof("Starting the instance %q with VM driver %q", inst.Name, inst.VMType)
 
 	haSockPath := filepath.Join(inst.Dir, filenames.HostAgentSock)
-
-	// Ask the user to sign the qemu binary with the "com.apple.security.hypervisor" if needed.
-	// Workaround for https://github.com/lima-vm/lima/issues/1742
-	if runtime.GOOS == "darwin" && inst.VMType == limayaml.QEMU {
-		macOSProductVersion, err := osutil.ProductVersion()
-		if err != nil {
-			return err
-		}
-		// The codesign --xml option is only available on macOS Monterey and later
-		if !macOSProductVersion.LessThan(*semver.New("12.0.0")) {
-			qExe, _, err := qemu.Exe(inst.Arch)
-			if err != nil {
-				return fmt.Errorf("failed to find the QEMU binary for the architecture %q: %w", inst.Arch, err)
-			}
-			if accel := qemu.Accel(inst.Arch); accel == "hvf" {
-				entitlementutil.AskToSignIfNotSignedProperly(qExe)
-			}
-		}
-	}
 
 	prepared, err := Prepare(ctx, inst)
 	if err != nil {
@@ -193,6 +191,9 @@ func Start(ctx context.Context, inst *store.Instance, limactl string, launchHost
 		"--socket", haSockPath)
 	if prepared.Driver.CanRunGUI() {
 		args = append(args, "--run-gui")
+	}
+	if prepared.GuestAgent != "" {
+		args = append(args, "--guestagent", prepared.GuestAgent)
 	}
 	if prepared.NerdctlArchiveCache != "" {
 		args = append(args, "--nerdctl-archive", prepared.NerdctlArchiveCache)
@@ -385,4 +386,56 @@ func ShowMessage(inst *store.Instance) error {
 		fmt.Fprintln(logrus.StandardLogger().Out, scanner.Text())
 	}
 	return scanner.Err()
+}
+
+// prepareDiffDisk checks the disk size difference between inst.Disk and yaml.Disk.
+// If there is no diffDisk, return nil (the instance has not been initialized or started yet).
+func prepareDiffDisk(inst *store.Instance) error {
+	diffDisk := filepath.Join(inst.Dir, filenames.DiffDisk)
+
+	// Handle the instance initialization
+	_, err := os.Stat(diffDisk)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	f, err := os.Open(diffDisk)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	img, err := qcow2reader.Open(f)
+	if err != nil {
+		return err
+	}
+
+	diskSize := img.Size()
+	format := string(img.Type())
+
+	if inst.Disk == diskSize {
+		return nil
+	}
+
+	logrus.Infof("Resize instance %s's disk from %s to %s", inst.Name, units.BytesSize(float64(diskSize)), units.BytesSize(float64(inst.Disk)))
+
+	if inst.Disk < diskSize {
+		inst.Disk = diskSize
+		return errors.New("diffDisk: Shrinking is currently unavailable")
+	}
+
+	if format == "raw" {
+		err = nativeimgutil.ResizeRawDisk(diffDisk, int(inst.Disk))
+	} else {
+		err = imgutil.ResizeDisk(diffDisk, format, int(inst.Disk))
+	}
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

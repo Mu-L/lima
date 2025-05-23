@@ -9,10 +9,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/goccy/go-yaml"
 	"github.com/invopop/jsonschema"
+	"github.com/lima-vm/lima/pkg/jsonschemautil"
 	"github.com/lima-vm/lima/pkg/limayaml"
-	jsonschema2 "github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/spf13/cobra"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 
@@ -60,6 +59,18 @@ func genschemaAction(cmd *cobra.Command, args []string) error {
 		{Type: "string"},
 		{Type: "object"},
 	}
+	// allow BaseTemplates to be either string (url) or array (array)
+	schema.Definitions["BaseTemplates"].Type = "" // was: "array"
+	schema.Definitions["BaseTemplates"].OneOf = []*jsonschema.Schema{
+		{Type: "string"},
+		{Type: "array"},
+	}
+	// allow LocatorWithDigest to be either string (url) or object (struct)
+	schema.Definitions["LocatorWithDigest"].Type = "" // was: "object"
+	schema.Definitions["LocatorWithDigest"].OneOf = []*jsonschema.Schema{
+		{Type: "string"},
+		{Type: "object"},
+	}
 	properties := schema.Definitions["LimaYAML"].Properties
 	getProp(properties, "os").Enum = toAny(limayaml.OSTypes)
 	getProp(properties, "arch").Enum = toAny(limayaml.ArchTypes)
@@ -81,22 +92,8 @@ func genschemaAction(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	compiler := jsonschema2.NewCompiler()
-	schema2, err := compiler.Compile(file)
-	if err != nil {
-		return err
-	}
 	for _, f := range args {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			return err
-		}
-		var y any
-		err = yaml.Unmarshal(b, &y)
-		if err != nil {
-			return err
-		}
-		err = schema2.Validate(y)
+		err = jsonschemautil.Validate(file, f)
 		if err != nil {
 			return fmt.Errorf("%q: %w", f, err)
 		}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -49,6 +50,8 @@ func TestFillDefault(t *testing.T) {
 			t.Skipf("unsupported GOARM: %d", arm)
 		}
 		arch = ARMV7L
+	case "ppc64le":
+		arch = PPC64LE
 	case "riscv64":
 		arch = RISCV64
 	case "s390x":
@@ -146,10 +149,9 @@ func TestFillDefault(t *testing.T) {
 			},
 		},
 		Mounts: []Mount{
-			// Location will be passed through localpathutil.Expand() which will normalize the name
-			// (add a drive letter). So we must start with a valid local path to match it again later.
-			{Location: filepath.Clean(t.TempDir())},
-			{Location: "{{.Dir}}/{{.Param.ONE}}", MountPoint: ptr.Of("/mnt/{{.Param.ONE}}")},
+			//nolint:usetesting // We need the OS temp directory name here; it is not used to create temp files for testing
+			{Location: filepath.Clean(os.TempDir())},
+			{Location: filepath.Clean("{{.Dir}}/{{.Param.ONE}}"), MountPoint: ptr.Of("/mnt/{{.Param.ONE}}")},
 		},
 		MountType: ptr.Of(NINEP),
 		Provision: []Provision{
@@ -240,7 +242,7 @@ func TestFillDefault(t *testing.T) {
 	expect.Mounts[0].Virtiofs.QueueSize = nil
 	// Only missing Mounts field is Writable, and the default value is also the null value: false
 	expect.Mounts[1].Location = filepath.Join(instDir, y.Param["ONE"])
-	expect.Mounts[1].MountPoint = ptr.Of(fmt.Sprintf("/mnt/%s", y.Param["ONE"]))
+	expect.Mounts[1].MountPoint = ptr.Of(path.Join("/mnt", y.Param["ONE"]))
 	expect.Mounts[1].Writable = ptr.Of(false)
 	expect.Mounts[1].SSHFS.Cache = ptr.Of(true)
 	expect.Mounts[1].SSHFS.FollowSymlinks = ptr.Of(false)
@@ -340,6 +342,7 @@ func TestFillDefault(t *testing.T) {
 			AARCH64: "arm64",
 			ARMV7L:  "armhf",
 			X8664:   "amd64",
+			PPC64LE: "ppc64le",
 			RISCV64: "riscv64",
 			S390X:   "s390x",
 		},
@@ -559,6 +562,7 @@ func TestFillDefault(t *testing.T) {
 			AARCH64: "uber-arm",
 			ARMV7L:  "armv8",
 			X8664:   "pentium",
+			PPC64LE: "power10",
 			RISCV64: "sifive-u54",
 			S390X:   "z14",
 		},

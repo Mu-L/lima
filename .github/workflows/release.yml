@@ -13,6 +13,7 @@ on:
     - 'master'
 env:
   GO111MODULE: on
+  GOTOOLCHAIN: local
 permissions:
   contents: read
 
@@ -37,7 +38,7 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 1
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Make darwin artifacts
@@ -64,21 +65,19 @@ jobs:
       with:
         name: artifacts-darwin
         path: _artifacts/
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
-    - name: Install gcc-x86-64-linux-gnu
+    - name: Install gcc
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc-x86-64-linux-gnu
-    - name: Install gcc-aarch64-linux-gnu
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu
+        sudo apt-get install -y gcc-x86-64-linux-gnu gcc-aarch64-linux-gnu
     - name: "Compile binaries"
       run: make artifacts-linux
     - name: "Make misc artifacts"
       run: make artifacts-misc
+    - name: "Validate artifactts"
+      run: ./hack/validate-artifact.sh ./_artifacts/*.tar.gz
     - name: "SHA256SUMS"
       run: |
         ( cd _artifacts; sha256sum *.tar.gz ) | tee /tmp/SHA256SUMS

@@ -10,13 +10,13 @@ import (
 )
 
 type LimaYAML struct {
-	Base                  BaseTemplates `yaml:"base,omitempty" json:"base,omitempty" jsonschema:"nullable"`
+	Base                  BaseTemplates `yaml:"base,omitempty" json:"base,omitempty"`
 	MinimumLimaVersion    *string       `yaml:"minimumLimaVersion,omitempty" json:"minimumLimaVersion,omitempty" jsonschema:"nullable"`
 	VMType                *VMType       `yaml:"vmType,omitempty" json:"vmType,omitempty" jsonschema:"nullable"`
 	VMOpts                VMOpts        `yaml:"vmOpts,omitempty" json:"vmOpts,omitempty"`
 	OS                    *OS           `yaml:"os,omitempty" json:"os,omitempty" jsonschema:"nullable"`
 	Arch                  *Arch         `yaml:"arch,omitempty" json:"arch,omitempty" jsonschema:"nullable"`
-	Images                []Image       `yaml:"images" json:"images"` // REQUIRED
+	Images                []Image       `yaml:"images,omitempty" json:"images,omitempty" jsonschema:"nullable"`
 	CPUType               CPUType       `yaml:"cpuType,omitempty" json:"cpuType,omitempty" jsonschema:"nullable"`
 	CPUs                  *int          `yaml:"cpus,omitempty" json:"cpus,omitempty" jsonschema:"nullable"`
 	Memory                *string       `yaml:"memory,omitempty" json:"memory,omitempty" jsonschema:"nullable"` // go-units.RAMInBytes
@@ -58,7 +58,7 @@ type BaseTemplates []LocatorWithDigest
 
 type LocatorWithDigest struct {
 	URL    string  `yaml:"url" json:"url"`
-	Digest *string `yaml:"digest,omitempty" json:"digest,omitempty" jsonschema:"nullable"` // TODO currently unused
+	Digest *string `yaml:"digest,omitempty" json:"digest,omitempty"` // TODO currently unused
 }
 
 type (
@@ -76,6 +76,7 @@ const (
 	X8664   Arch = "x86_64"
 	AARCH64 Arch = "aarch64"
 	ARMV7L  Arch = "armv7l"
+	PPC64LE Arch = "ppc64le"
 	RISCV64 Arch = "riscv64"
 	S390X   Arch = "s390x"
 
@@ -91,7 +92,7 @@ const (
 
 var (
 	OSTypes    = []OS{LINUX}
-	ArchTypes  = []Arch{X8664, AARCH64, ARMV7L, RISCV64, S390X}
+	ArchTypes  = []Arch{X8664, AARCH64, ARMV7L, PPC64LE, RISCV64, S390X}
 	MountTypes = []MountType{REVSSHFS, NINEP, VIRTIOFS, WSLMount}
 	VMTypes    = []VMType{QEMU, VZ, WSL2}
 )
@@ -221,16 +222,16 @@ const (
 	ProvisionModeUser       ProvisionMode = "user"
 	ProvisionModeBoot       ProvisionMode = "boot"
 	ProvisionModeDependency ProvisionMode = "dependency"
-	ProvisionModeAnsible    ProvisionMode = "ansible"
+	ProvisionModeAnsible    ProvisionMode = "ansible" // DEPRECATED
 	ProvisionModeData       ProvisionMode = "data"
 )
 
 type Provision struct {
 	Mode                            ProvisionMode      `yaml:"mode,omitempty" json:"mode,omitempty" jsonschema:"default=system"`
 	SkipDefaultDependencyResolution *bool              `yaml:"skipDefaultDependencyResolution,omitempty" json:"skipDefaultDependencyResolution,omitempty"`
-	Script                          string             `yaml:"script" json:"script"`
+	Script                          string             `yaml:"script,omitempty" json:"script,omitempty"`
 	File                            *LocatorWithDigest `yaml:"file,omitempty" json:"file,omitempty" jsonschema:"nullable"`
-	Playbook                        string             `yaml:"playbook,omitempty" json:"playbook,omitempty"`
+	Playbook                        string             `yaml:"playbook,omitempty" json:"playbook,omitempty"` // DEPRECATED
 	// All ProvisionData fields must be nil unless Mode is ProvisionModeData
 	ProvisionData `yaml:",inline"` // Flatten fields for "strict" YAML mode
 }

@@ -61,34 +61,41 @@ var (
 )
 
 func defaultCPUType() CPUType {
+	// x86_64 + TCG + max was previously unstable until 2021.
+	// https://bugzilla.redhat.com/show_bug.cgi?id=1999700
+	// https://bugs.launchpad.net/qemu/+bug/1748296
+	defaultX8664 := "max"
+	if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
+		// https://github.com/lima-vm/lima/pull/3487#issuecomment-2846253560
+		// > #931 intentionally prevented the code from setting it to max when running on Windows,
+		// > and kept it at qemu64.
+		//
+		// TODO: remove this if "max" works with the latest qemu
+		defaultX8664 = "qemu64"
+	}
 	cpuType := map[Arch]string{
-		AARCH64: "cortex-a76", // available since QEMU 7.1 (Aug 2022)
-		ARMV7L:  "cortex-a7",
-		// Since https://github.com/lima-vm/lima/pull/494, we use qemu64 cpu for better emulation of x86_64.
-		X8664:   "qemu64",
-		RISCV64: "rv64", // FIXME: what is the right choice for riscv64?
-		S390X:   "qemu", // FIXME: what is the right choice for s390x?
+		AARCH64: "max",
+		ARMV7L:  "max",
+		X8664:   defaultX8664,
+		PPC64LE: "max",
+		RISCV64: "max",
+		S390X:   "max",
 	}
 	for arch := range cpuType {
 		if IsNativeArch(arch) && IsAccelOS() {
 			if HasHostCPU() {
 				cpuType[arch] = "host"
-			} else if HasMaxCPU() {
-				cpuType[arch] = "max"
 			}
 		}
 		if arch == X8664 && runtime.GOOS == "darwin" {
-			switch cpuType[arch] {
-			case "host", "max":
-				// disable AVX-512, since it requires trapping instruction faults in guest
-				// Enterprise Linux requires either v2 (SSE4) or v3 (AVX2), but not yet v4.
-				cpuType[arch] += ",-avx512vl"
+			// disable AVX-512, since it requires trapping instruction faults in guest
+			// Enterprise Linux requires either v2 (SSE4) or v3 (AVX2), but not yet v4.
+			cpuType[arch] += ",-avx512vl"
 
-				// Disable pdpe1gb on Intel Mac
-				// https://github.com/lima-vm/lima/issues/1485
-				// https://stackoverflow.com/a/72863744/5167443
-				cpuType[arch] += ",-pdpe1gb"
-			}
+			// Disable pdpe1gb on Intel Mac
+			// https://github.com/lima-vm/lima/issues/1485
+			// https://stackoverflow.com/a/72863744/5167443
+			cpuType[arch] += ",-pdpe1gb"
 		}
 	}
 	return cpuType
@@ -738,7 +745,7 @@ func FillDefault(y, d, o *LimaYAML, filePath string, warn bool) {
 	location := make(map[string]int)
 	for _, mount := range slices.Concat(d.Mounts, y.Mounts, o.Mounts) {
 		if out, err := executeHostTemplate(mount.Location, instDir, y.Param); err == nil {
-			mount.Location = out.String()
+			mount.Location = filepath.Clean(out.String())
 		} else {
 			logrus.WithError(err).Warnf("Couldn't process mount location %q as a template", mount.Location)
 		}
@@ -955,14 +962,22 @@ func executeHostTemplate(format, instDir string, param map[string]string) (bytes
 	tmpl, err := template.New("").Parse(format)
 	if err == nil {
 		limaHome, _ := dirnames.LimaDir()
+		globalTempDir := "/tmp"
+		if runtime.GOOS == "windows" {
+			// On Windows the global temp directory "%SystemRoot%\Temp" (normally "C:\Windows\Temp")
+			// is not writable by regular users.
+			globalTempDir = os.TempDir()
+		}
 		data := map[string]any{
 			"Dir":  instDir,
 			"Name": filepath.Base(instDir),
 			// TODO: add hostname fields for the host and the guest
-			"UID":   currentUser.Uid,
-			"User":  currentUser.Username,
-			"Home":  userHomeDir,
-			"Param": param,
+			"UID":           currentUser.Uid,
+			"User":          currentUser.Username,
+			"Home":          userHomeDir,
+			"Param":         param,
+			"GlobalTempDir": globalTempDir,
+			"TempDir":       os.TempDir(),
 
 			"Instance": filepath.Base(instDir), // DEPRECATED, use `{{.Name}}`
 			"LimaHome": limaHome,               // DEPRECATED, use `{{.Dir}}` instead of `{{.LimaHome}}/{{.Instance}}`
@@ -1081,6 +1096,8 @@ func NewArch(arch string) Arch {
 		}
 		logrus.Warnf("Unknown arm: %d", arm)
 		return arch
+	case "ppc64le":
+		return PPC64LE
 	case "riscv64":
 		return RISCV64
 	case "s390x":
@@ -1265,18 +1282,14 @@ func HasHostCPU() bool {
 	return false
 }
 
-func HasMaxCPU() bool {
-	// windows: WHPX: Unexpected VP exit code 4
-	return HasHostCPU()
-}
-
 func IsNativeArch(arch Arch) bool {
 	nativeX8664 := arch == X8664 && runtime.GOARCH == "amd64"
 	nativeAARCH64 := arch == AARCH64 && runtime.GOARCH == "arm64"
 	nativeARMV7L := arch == ARMV7L && runtime.GOARCH == "arm" && goarm() == 7
+	nativePPC64LE := arch == PPC64LE && runtime.GOARCH == "ppc64le"
 	nativeRISCV64 := arch == RISCV64 && runtime.GOARCH == "riscv64"
 	nativeS390X := arch == S390X && runtime.GOARCH == "s390x"
-	return nativeX8664 || nativeAARCH64 || nativeARMV7L || nativeRISCV64 || nativeS390X
+	return nativeX8664 || nativeAARCH64 || nativeARMV7L || nativePPC64LE || nativeRISCV64 || nativeS390X
 }
 
 func unique(s []string) []string {

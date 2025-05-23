@@ -40,8 +40,7 @@ func Read(ctx context.Context, name, locator string) (*Template, error) {
 	isTemplateURL, templateURL := SeemsTemplateURL(locator)
 	switch {
 	case isTemplateURL:
-		// No need to use SecureJoin here. https://github.com/lima-vm/lima/pull/805#discussion_r853411702
-		templateName := filepath.Join(templateURL.Host, templateURL.Path)
+		templateName := path.Join(templateURL.Host, templateURL.Path)
 		logrus.Debugf("interpreting argument %q as a template name %q", locator, templateName)
 		if tmpl.Name == "" {
 			// e.g., templateName = "deprecated/centos-7.yaml" , tmpl.Name = "centos-7"
@@ -139,6 +138,8 @@ var archKeywords = map[string]limayaml.Arch{
 	"arm64":   limayaml.AARCH64,
 	"armhf":   limayaml.ARMV7L,
 	"armv7l":  limayaml.ARMV7L,
+	"ppc64el": limayaml.PPC64LE,
+	"ppc64le": limayaml.PPC64LE,
 	"riscv64": limayaml.RISCV64,
 	"s390x":   limayaml.S390X,
 	"x86_64":  limayaml.X8664,

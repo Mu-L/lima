@@ -1,18 +1,18 @@
 images:
 # Try to use release-yyyyMMdd image if available. Note that release-yyyyMMdd will be removed after several months.
 
-- location: https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20250317.0.x86_64.qcow2
-  arch: x86_64
-  digest: sha256:24578ef181b03ab577acaa885cbc24b1c91fbae613d50152796cbe6c2e004aab
-
-- location: https://cloud.centos.org/centos/10-stream/aarch64/images/CentOS-Stream-GenericCloud-10-20250317.0.aarch64.qcow2
-  arch: aarch64
-  digest: sha256:5cfd6199d9f9ada1e4e44113938981b2dce96ba3e9e670549e6e1c1a8e74f167
-
-- location: https://cloud.centos.org/centos/10-stream/s390x/images/CentOS-Stream-GenericCloud-10-20250317.0.s390x.qcow2
-  arch: s390x
-  digest: sha256:903b47d726fa9a892853cfb805d52a0bf75a7fc710169619bdaae7c3e3a00296
-
+- location: "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20250520.0.x86_64.qcow2"
+  arch: "x86_64"
+  digest: "sha256:16b7ef3db3fe1ac60d8140d34f1bf7b24dc1636e7ad2412f909232f014a2875d"
+- location: "https://cloud.centos.org/centos/10-stream/aarch64/images/CentOS-Stream-GenericCloud-10-20250520.0.aarch64.qcow2"
+  arch: "aarch64"
+  digest: "sha256:814d7887011c102b3c5fe55e2a5ba4966d89e7c26a38da1e7277719861aeba0a"
+- location: "https://cloud.centos.org/centos/10-stream/s390x/images/CentOS-Stream-GenericCloud-10-20250520.0.s390x.qcow2"
+  arch: "s390x"
+  digest: "sha256:8d4597d8117abe216beb30e3b52bb2b5e4e405544151055e139d77d05b37d423"
+- location: "https://cloud.centos.org/centos/10-stream/ppc64le/images/CentOS-Stream-GenericCloud-10-20250520.0.ppc64le.qcow2"
+  arch: "ppc64le"
+  digest: "sha256:88ad4ba818dfd0f43e5fff9d4a793589df4f35c5120a9cf3958960d765662ca9"
 # Fallback to the latest release image.
 # Hint: run `limactl prune` to invalidate the cache
 
@@ -25,15 +25,12 @@ images:
 - location: https://cloud.centos.org/centos/10-stream/s390x/images/CentOS-Stream-GenericCloud-10-latest.s390x.qcow2
   arch: s390x
 
+- location: https://cloud.centos.org/centos/10-stream/ppc64le/images/CentOS-Stream-GenericCloud-10-latest.ppc64le.qcow2
+  arch: ppc64le
+
 mountTypesUnsupported: [9p]
 
 firmware:
   # CentOS Stream 10 still requires legacyBIOS
   # https://issues.redhat.com/browse/CS-2672
   legacyBIOS: true
-
-cpuType:
-  # When emulating Intel on ARM hosts, Lima uses the "qemu64" CPU by default (https://github.com/lima-vm/lima/pull/494).
-  # However, CentOS Stream 10 kernel reboots indefinitely due to lack of the support for x86_64-v3 instructions.
-  # This issue is tracked in <https://github.com/lima-vm/lima/issues/3063>.
-  x86_64: "Haswell-v4"

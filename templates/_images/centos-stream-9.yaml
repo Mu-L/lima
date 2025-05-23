@@ -1,18 +1,18 @@
 images:
 # Try to use release-yyyyMMdd image if available. Note that release-yyyyMMdd will be removed after several months.
 
-- location: https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20250317.0.x86_64.qcow2
-  arch: x86_64
-  digest: sha256:d126417bee8428880ec9070f1833adcf75f048be839b7c121fda4f5ef242eea2
-
-- location: https://cloud.centos.org/centos/9-stream/aarch64/images/CentOS-Stream-GenericCloud-9-20250317.0.aarch64.qcow2
-  arch: aarch64
-  digest: sha256:e292c1dcd2a58c9e7e47b66f8eb565f647743bcce088e2434ccb746b12fe694a
-
-- location: https://cloud.centos.org/centos/9-stream/s390x/images/CentOS-Stream-GenericCloud-9-20250317.0.s390x.qcow2
-  arch: s390x
-  digest: sha256:b3147474d2332a9d0d47fc0e43ff0c9d37cacf485925396beee0a057a3b7ec6f
-
+- location: "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20250512.0.x86_64.qcow2"
+  arch: "x86_64"
+  digest: "sha256:9c7cbce3c1fdd1e06e4fea8d577ec014f18eb700e48629b04a84ce1589890135"
+- location: "https://cloud.centos.org/centos/9-stream/aarch64/images/CentOS-Stream-GenericCloud-9-20250512.0.aarch64.qcow2"
+  arch: "aarch64"
+  digest: "sha256:583aff93ae902f5085aa2bc44f648fd63d5fa706285823bd9bbbaf4fc40070dd"
+- location: "https://cloud.centos.org/centos/9-stream/s390x/images/CentOS-Stream-GenericCloud-9-20250512.0.s390x.qcow2"
+  arch: "s390x"
+  digest: "sha256:4788b2bb31c9014c0eb09f8f058ae88ef5956df058e553c86ef0dcab044d334a"
+- location: "https://cloud.centos.org/centos/9-stream/ppc64le/images/CentOS-Stream-GenericCloud-9-20250512.0.ppc64le.qcow2"
+  arch: "ppc64le"
+  digest: "sha256:0e1886f61015998abb0dcc691238b28bf36933be27e7bee5a4a4df3b5fdf8844"
 # Fallback to the latest release image.
 # Hint: run `limactl prune` to invalidate the cache
 
@@ -24,6 +24,9 @@ images:
 
 - location: https://cloud.centos.org/centos/9-stream/s390x/images/CentOS-Stream-GenericCloud-9-latest.s390x.qcow2
   arch: s390x
+
+- location: https://cloud.centos.org/centos/9-stream/ppc64le/images/CentOS-Stream-GenericCloud-9-latest.ppc64le.qcow2
+  arch: ppc64le
 
 mountTypesUnsupported: [9p]
 

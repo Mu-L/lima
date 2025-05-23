@@ -34,7 +34,8 @@ memory: null
 disk: null
 
 # Expose host directories to the guest, the mount point might be accessible from all UIDs in the guest
-# "location" can use these template variables: {{.Home}}, {{.Dir}}, {{.Name}}, {{.UID}}, {{.User}}, and {{.Param.Key}}.
+# "location" can use these template variables: {{.Home}}, {{.Dir}}, {{.Name}}, {{.UID}}, {{.User}}, {{.Param.Key}},
+# {{.GlobalTempDir}}, and {{.TempDir}}. The global temp dir is always "/tmp" on Unix.
 # "mountPoint" can use these template variables: {{.Home}}, {{.Name}}, {{.Hostname}}, {{.UID}}, {{.User}}, and {{.Param.Key}}.
 # 🟢 Builtin default: [] (Mount nothing)
 # 🔵 This file: Mount the home as read-only, /tmp/lima as writable  (inherited via the `base` mechanism later in this file)
@@ -230,6 +231,8 @@ containerd:
 # # It requires `ansible-playbook` command to be installed.
 # # Environment variables such as ANSIBLE_CONFIG can be used, to control the behavior of the playbook execution.
 # # See ansible docs, and `ansible-config`, for more info https://docs.ansible.com/ansible/latest/playbook_guide/
+# # DEPRECATED The ansible mode is deprecated, and should not be used. Instead call ansible-playbook directly,
+# # either from the host after the instance is started or from the instance by running ansible locally instead.
 # - mode: ansible
 #   playbook: playbook.yaml
 # # `data` is a file that is written to the guest filesystem and not executed at all.
@@ -331,10 +334,10 @@ os: null
 # Setting of instructions is supported like this: "qemu64,+ssse3".
 # 🟢 Builtin default: hard-coded arch map with type (see the output of `limactl info | jq .defaultTemplate.cpuType`)
 cpuType:
-#   aarch64: "cortex-a76" # (or "host" when running on aarch64 host)
-#   armv7l: "cortex-a7" # (or "host" when running on armv7l host)
-#   riscv64: "rv64" # (or "host" when running on riscv64 host)
-#   x86_64: "qemu64" # (or "host,-pdpe1gb" when running on x86_64 host)
+#   aarch64: "max" # (or "host" when running on aarch64 host)
+#   armv7l:  "max" # (or "host" when running on armv7l host)
+#   riscv64: "max" # (or "host" when running on riscv64 host)
+#   x86_64:  "max" # (or "host" when running on x86_64 host; additional options are appended on Intel Mac)
 
 rosetta:
   # Enable Rosetta inside the VM; needs `vmType: vz`

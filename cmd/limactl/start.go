@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -118,8 +119,7 @@ func loadOrCreateInstance(cmd *cobra.Command, args []string, createOnly bool) (*
 		return nil, err
 	}
 	if isTemplateURL, templateURL := limatmpl.SeemsTemplateURL(arg); isTemplateURL {
-		// No need to use SecureJoin here. https://github.com/lima-vm/lima/pull/805#discussion_r853411702
-		templateName := filepath.Join(templateURL.Host, templateURL.Path)
+		templateName := path.Join(templateURL.Host, templateURL.Path)
 		switch templateName {
 		case "experimental/vz":
 			logrus.Warn("template://experimental/vz was merged into the default template in Lima v1.0. See also <https://lima-vm.io/docs/config/vmtype/>.")
@@ -371,16 +371,18 @@ func createStartActionCommon(cmd *cobra.Command, _ []string) (exit bool, err err
 	if listTemplates, err := cmd.Flags().GetBool("list-templates"); err != nil {
 		return true, err
 	} else if listTemplates {
-		if templates, err := templatestore.Templates(); err == nil {
-			w := cmd.OutOrStdout()
-			for _, f := range templates {
-				// Don't show internal base templates like `_default/*` and `_images/*`.
-				if !strings.HasPrefix(f.Name, "_") {
-					_, _ = fmt.Fprintln(w, f.Name)
-				}
-			}
-			return true, nil
+		templates, err := templatestore.Templates()
+		if err != nil {
+			return true, err
 		}
+		w := cmd.OutOrStdout()
+		for _, f := range templates {
+			// Don't show internal base templates like `_default/*` and `_images/*`.
+			if !strings.HasPrefix(f.Name, "_") {
+				_, _ = fmt.Fprintln(w, f.Name)
+			}
+		}
+		return true, nil
 	}
 	return false, nil
 }
@@ -454,12 +456,12 @@ func startAction(cmd *cobra.Command, args []string) error {
 	return instance.Start(ctx, inst, "", launchHostAgentForeground)
 }
 
-func createBashComplete(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-	return bashCompleteTemplateNames(cmd)
+func createBashComplete(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return bashCompleteTemplateNames(cmd, toComplete)
 }
 
-func startBashComplete(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+func startBashComplete(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	compInst, _ := bashCompleteInstanceNames(cmd)
-	compTmpl, _ := bashCompleteTemplateNames(cmd)
+	compTmpl, _ := bashCompleteTemplateNames(cmd, toComplete)
 	return append(compInst, compTmpl...), cobra.ShellCompDirectiveDefault
 }

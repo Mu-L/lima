@@ -16,6 +16,7 @@ on:
     - "**.md"
 env:
   LIMACTL_CREATE_ARGS: ""
+  GOTOOLCHAIN: local
 
 permissions: read-all
 
@@ -29,7 +30,7 @@ jobs:
       with:
         # To avoid "failed to load YAML file \"templates/experimental/riscv64.yaml\": can't parse builtin Lima version \"3f3a6f6\": 3f3a6f6 is not in dotted-tri format"
         fetch-depth: 0
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Install protoc
@@ -39,9 +40,9 @@ jobs:
     - name: Verify generated files
       run: make install-tools generate check-generated
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@1481404843c368bc19ca9406f87d6e0fc97bdcfd  # v7.0.0
+      uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9  # v8.0.0
       with:
-        version: v2.0.1
+        version: v2.1.0
         args: --verbose
     - name: Run yamllint
       run: yamllint .
@@ -111,7 +112,7 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 1
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: ${{ matrix.go-version }}
     - name: Unit tests
@@ -157,7 +158,7 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 1
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Unit tests
@@ -184,7 +185,7 @@ jobs:
       with:
         # To avoid "failed to load YAML file \"templates/experimental/riscv64.yaml\": can't parse builtin Lima version \"3f3a6f6\": 3f3a6f6 is not in dotted-tri format"
         fetch-depth: 0
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Unit tests
@@ -259,7 +260,7 @@ jobs:
       with:
         # To avoid "failed to load YAML file \"templates/experimental/riscv64.yaml\": can't parse builtin Lima version \"3f3a6f6\": 3f3a6f6 is not in dotted-tri format"
         fetch-depth: 0
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Make
@@ -310,7 +311,7 @@ jobs:
         # fetch-depth is set to 0 to let `limactl --version` print semver-ish version
         fetch-depth: 0
         ref: ${{ github.event.pull_request.head.sha }}
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
@@ -355,7 +356,7 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 0
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Make
@@ -419,7 +420,7 @@ jobs:
         path: homebrew-core
         fetch-depth: 0
         filter: tree:0
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Cache image used by ${{ matrix.oldver }}/examples/ubuntu-lts.yaml
@@ -455,7 +456,7 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 0
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Make
@@ -490,7 +491,7 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         fetch-depth: 0
-    - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5.4.0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
       with:
         go-version: 1.24.x
     - name: Install gomodjail
@@ -508,3 +509,49 @@ jobs:
         template: templates/default.yaml
     - name: Smoke test
       run: gomodjail run --go-mod=./go.mod -- limactl start --tty=false
+
+  cross:
+    name: "Cross-compile (NetBSD, DragonFlyBSD)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        # To avoid "failed to load YAML file \"templates/experimental/riscv64.yaml\": can't parse builtin Lima version \"3f3a6f6\": 3f3a6f6 is not in dotted-tri format"
+        fetch-depth: 0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+      with:
+        go-version: 1.24.x
+    - run: GOOS=netbsd go build ./...
+    - run: GOOS=dragonfly go build ./...
+
+  qemu-linux-old:
+    name: "Smoke tests (QEMU, old Linux host)"
+    runs-on: ubuntu-22.04  # QEMU 6.2
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        # To avoid "failed to load YAML file \"templates/experimental/riscv64.yaml\": can't parse builtin Lima version \"3f3a6f6\": 3f3a6f6 is not in dotted-tri format"
+        fetch-depth: 0
+    - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+      with:
+        go-version: 1.24.x
+    - name: Make
+      run: make
+    - name: Install
+      run: sudo make install
+    - name: Cache image used by templates/default.yaml
+      uses: ./.github/actions/setup_cache_for_template
+      with:
+        template: templates/default.yaml
+    - name: Install test dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends ovmf qemu-system-x86 qemu-utils
+        qemu-system-x86_64 --version
+        sudo modprobe kvm
+        # `sudo usermod -aG kvm $(whoami)` does not take an effect on GHA
+        sudo chown $(whoami) /dev/kvm
+    - name: Smoke test
+      run: limactl start --tty=false
