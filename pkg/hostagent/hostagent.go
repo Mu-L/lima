@@ -157,7 +157,7 @@ func New(ctx context.Context, instName string, stdout io.Writer, signalCh chan o
 		}
 	}
 
-	limaDriver, err := driverutil.CreateConfiguredDriver(inst, sshLocalPort)
+	limaDriver, err := driverutil.CreateConfiguredDriver(inst, sshLocalPort, driverutil.OwnerHostAgent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create driver instance: %w", err)
 	}

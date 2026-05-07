@@ -14,15 +14,24 @@ import (
 	"github.com/lima-vm/lima/v2/pkg/registry"
 )
 
+const (
+	OwnerHostAgent = "ha"
+	OwnerCLI       = "cli"
+)
+
 // CreateConfiguredDriver creates a driver.ConfiguredDriver for the given instance.
-func CreateConfiguredDriver(inst *limatype.Instance, sshLocalPort int) (*driver.ConfiguredDriver, error) {
+// pidFileOwner identifies the caller (e.g. "ha" or "cli") to isolate driver PID files.
+func CreateConfiguredDriver(inst *limatype.Instance, sshLocalPort int, pidFileOwner string) (*driver.ConfiguredDriver, error) {
 	limaDriver := inst.Config.VMType
 	extDriver, intDriver, exists := registry.Get(*limaDriver)
 	if !exists {
 		return nil, fmt.Errorf("unknown or unsupported VM type: %s", *limaDriver)
 	}
-
+	if pidFileOwner == "" {
+		pidFileOwner = OwnerCLI
+	}
 	if extDriver != nil {
+		extDriver.PIDFileOwner = pidFileOwner
 		extDriver.Logger.Debugf("Using external driver %q", extDriver.Name)
 		if extDriver.Client == nil || extDriver.Command == nil {
 			logrus.Debugf("Starting new instance of external driver %q", extDriver.Name)
