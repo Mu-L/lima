@@ -50,7 +50,7 @@ require (
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.44.0 // gomodjail:unconfined
 	golang.org/x/text v0.36.0
-	google.golang.org/grpc v1.80.0
+	google.golang.org/grpc v1.81.0
 	google.golang.org/protobuf v1.36.11 // gomodjail:unconfined
 	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473
 	gotest.tools/v3 v3.5.2
@@ -111,11 +111,11 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/mod v0.34.0 // indirect
-	golang.org/x/oauth2 v0.35.0 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 	// gomodjail:unconfined
 	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f // indirect
