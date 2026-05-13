@@ -133,15 +133,45 @@ func validateArch(ctx context.Context, cfg *limatype.LimaYAML) error {
 
 // Helper method for mount type validation.
 func validateMountType(cfg *limatype.LimaYAML) error {
-	if cfg.MountType != nil && *cfg.MountType == limatype.VIRTIOFS && runtime.GOOS != "linux" {
-		return fmt.Errorf("field `mountType` must be %q or %q for QEMU driver on non-Linux, got %q",
-			limatype.REVSSHFS, limatype.NINEP, *cfg.MountType)
-	}
+	// 1. First, check if the user explicitly blocked this mount type in their config.
 	if cfg.MountTypesUnsupported != nil && cfg.MountType != nil && slices.Contains(cfg.MountTypesUnsupported, *cfg.MountType) {
 		return fmt.Errorf("mount type %q is explicitly unsupported", *cfg.MountType)
 	}
-	if runtime.GOOS == "windows" && cfg.MountType != nil && *cfg.MountType == limatype.NINEP {
-		return fmt.Errorf("mount type %q is not supported on Windows", limatype.NINEP)
+
+	// 2. Then, check if the mount type is valid for the current Operating System.
+	if cfg.MountType != nil {
+		switch runtime.GOOS {
+		case "linux":
+			switch *cfg.MountType {
+			case limatype.REVSSHFS, limatype.NINEP, limatype.VIRTIOFS:
+				return nil
+			default:
+				return fmt.Errorf("field `mountType` must be one of %v for QEMU driver on Linux, got %q", []string{limatype.REVSSHFS, limatype.NINEP, limatype.VIRTIOFS}, *cfg.MountType)
+			}
+		case "darwin":
+			switch *cfg.MountType {
+			case limatype.REVSSHFS, limatype.NINEP:
+				return nil
+			default:
+				return fmt.Errorf("field `mountType` must be %q or %q for QEMU driver on macOS, got %q", limatype.REVSSHFS, limatype.NINEP, *cfg.MountType)
+			}
+		case "windows":
+			// Windows version of QEMU does not support 9p yet, so we should not suggest it.
+			// https://gitlab.com/qemu-project/qemu/-/work_items/974
+			switch *cfg.MountType {
+			case limatype.REVSSHFS:
+				return nil
+			default:
+				return fmt.Errorf("field `mountType` must be %q for QEMU driver on Windows, got %q", limatype.REVSSHFS, *cfg.MountType)
+			}
+		default:
+			switch *cfg.MountType {
+			case limatype.REVSSHFS, limatype.NINEP:
+				return nil
+			default:
+				return fmt.Errorf("field `mountType` must be %q or %q for QEMU driver on %s, got %q", limatype.REVSSHFS, limatype.NINEP, runtime.GOOS, *cfg.MountType)
+			}
+		}
 	}
 
 	return nil
