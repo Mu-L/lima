@@ -13,7 +13,7 @@ require (
 	github.com/cheggaaa/pb/v3 v3.1.7 // gomodjail:unconfined
 	github.com/cilium/ebpf v0.21.0 // gomodjail:unconfined
 	github.com/containerd/continuity v0.5.0
-	github.com/containers/gvisor-tap-vsock v0.8.8 // gomodjail:unconfined
+	github.com/containers/gvisor-tap-vsock v0.8.9 // gomodjail:unconfined
 	github.com/coreos/go-semver v0.3.1
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/cpuguy83/go-md2man/v2 v2.0.7
@@ -110,7 +110,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/mod v0.34.0 // indirect
+	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
