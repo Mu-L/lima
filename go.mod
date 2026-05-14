@@ -18,7 +18,7 @@ require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/cpuguy83/go-md2man/v2 v2.0.7
 	github.com/digitalocean/go-qemu v0.0.0-20221209210016-f035778c97f7
-	github.com/diskfs/go-diskfs v1.9.1 // gomodjail:unconfined
+	github.com/diskfs/go-diskfs v1.9.2 // gomodjail:unconfined
 	github.com/docker/go-units v0.5.0
 	github.com/foxcpp/go-mockdns v1.2.0
 	github.com/goccy/go-yaml v1.19.2
@@ -95,7 +95,7 @@ require (
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.3.0 // indirect
-	github.com/pierrec/lz4/v4 v4.1.22 // indirect
+	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
