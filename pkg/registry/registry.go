@@ -34,6 +34,7 @@ type ExternalDriver struct {
 	Ctx          context.Context
 	Logger       *logrus.Logger
 	CancelFunc   context.CancelFunc
+	PIDFileOwner string
 }
 
 var (
